@@ -9,6 +9,10 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -17,6 +21,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -48,6 +53,8 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var mapView: MapView
     private lateinit var geofenceManager: GeofenceManager
+    private lateinit var offlineMapManager: OfflineMapManager
+    private lateinit var offlineDataCache: OfflineDataCache
     
     private var pointAnnotationManager: PointAnnotationManager? = null
     private var circleAnnotationManager: CircleAnnotationManager? = null
@@ -64,6 +71,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var eventLogTextView: TextView
     private lateinit var toggleButton: Button
     private var isMonitorVisible = false
+    
+    // C1: Offline Status UI Components
+    private lateinit var offlineStatusBar: LinearLayout
+    private lateinit var offlineStatusText: TextView
+    private lateinit var offlineStatusIcon: TextView
+    private lateinit var downloadButton: Button
+    private lateinit var downloadProgress: ProgressBar
+    private var isOnline = true
+    
+    // Network callback for connectivity monitoring
+    private lateinit var connectivityManager: ConnectivityManager
+    private lateinit var networkCallback: ConnectivityManager.NetworkCallback
     
     data class GeofenceEvent(
         val landmarkId: String,
@@ -113,7 +132,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Initialize managers
         geofenceManager = GeofenceManager(this)
+        offlineMapManager = OfflineMapManager(this)
+        offlineDataCache = OfflineDataCache(this)
+        
+        // Initialize network monitoring
+        setupNetworkMonitoring()
         
         // Create root layout
         val rootLayout = FrameLayout(this)
@@ -124,6 +149,9 @@ class MainActivity : ComponentActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
+        
+        // C1: Create offline status bar at top
+        createOfflineStatusBar(rootLayout)
         
         // Create and add Geofence Monitor UI
         createGeofenceMonitorUI(rootLayout)
@@ -160,19 +188,250 @@ class MainActivity : ComponentActivity() {
                 IntentFilter(GeofenceBroadcastReceiver.ACTION_GEOFENCE_EVENT)
             )
         }
+        
+        // C1: Initialize offline cache on startup
+        initializeOfflineCache()
+    }
+    
+    /**
+     * C1: Setup network connectivity monitoring
+     */
+    private fun setupNetworkMonitoring() {
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                runOnUiThread {
+                    isOnline = true
+                    updateOfflineStatusUI()
+                    Log.d(TAG, "Network available - Online mode")
+                }
+            }
+            
+            override fun onLost(network: Network) {
+                runOnUiThread {
+                    isOnline = false
+                    updateOfflineStatusUI()
+                    Log.d(TAG, "Network lost - Offline mode")
+                    
+                    // Show toast about offline mode
+                    if (offlineDataCache.isCacheValid()) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "📴 Offline Mode - Using cached data",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+        }
+        
+        val networkRequest = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        
+        connectivityManager.registerNetworkCallback(networkRequest, networkCallback)
+        
+        // Check initial state
+        isOnline = isNetworkAvailable()
+    }
+    
+    /**
+     * Check if network is available
+     */
+    private fun isNetworkAvailable(): Boolean {
+        val network = connectivityManager.activeNetwork
+        val capabilities = connectivityManager.getNetworkCapabilities(network)
+        return capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+    
+    /**
+     * C1: Create offline status bar UI
+     */
+    private fun createOfflineStatusBar(rootLayout: FrameLayout) {
+        offlineStatusBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#4CAF50")) // Green for online
+            setPadding(16, 12, 16, 12)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        
+        // Status icon
+        offlineStatusIcon = TextView(this).apply {
+            text = "🟢"
+            textSize = 16f
+            setPadding(0, 0, 12, 0)
+        }
+        offlineStatusBar.addView(offlineStatusIcon)
+        
+        // Status text
+        offlineStatusText = TextView(this).apply {
+            text = "Online"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        offlineStatusBar.addView(offlineStatusText)
+        
+        // Progress bar (hidden by default)
+        downloadProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            layoutParams = LinearLayout.LayoutParams(100, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = 12
+            }
+            visibility = View.GONE
+            max = 100
+        }
+        offlineStatusBar.addView(downloadProgress)
+        
+        // Download button
+        downloadButton = Button(this).apply {
+            text = "📥 Cache"
+            setBackgroundColor(Color.parseColor("#1976D2"))
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(16, 8, 16, 8)
+            setOnClickListener { handleOfflineDownload() }
+        }
+        offlineStatusBar.addView(downloadButton)
+        
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP
+        }
+        rootLayout.addView(offlineStatusBar, params)
+        
+        // Initial UI update
+        updateOfflineStatusUI()
+    }
+    
+    /**
+     * C1: Update offline status UI based on connectivity and cache state
+     */
+    private fun updateOfflineStatusUI() {
+        val cacheInfo = offlineDataCache.getCacheInfo()
+        
+        if (isOnline) {
+            offlineStatusBar.setBackgroundColor(Color.parseColor("#4CAF50"))
+            offlineStatusIcon.text = "🟢"
+            offlineStatusText.text = if (cacheInfo.isValid) {
+                "Online | Cache: ${cacheInfo.itemCount} items"
+            } else {
+                "Online | No cache"
+            }
+            downloadButton.text = if (cacheInfo.isValid) "🔄 Update" else "📥 Cache"
+            downloadButton.isEnabled = true
+        } else {
+            offlineStatusBar.setBackgroundColor(Color.parseColor("#FF9800"))
+            offlineStatusIcon.text = "📴"
+            offlineStatusText.text = if (cacheInfo.isValid) {
+                "Offline | Using cache (${cacheInfo.itemCount} items)"
+            } else {
+                "Offline | No cache available!"
+            }
+            downloadButton.text = "Offline"
+            downloadButton.isEnabled = false
+            
+            if (!cacheInfo.isValid) {
+                offlineStatusBar.setBackgroundColor(Color.parseColor("#F44336"))
+            }
+        }
+    }
+    
+    /**
+     * C1: Handle offline download button click
+     */
+    private fun handleOfflineDownload() {
+        Toast.makeText(this, "Starting offline cache...", Toast.LENGTH_SHORT).show()
+        
+        // Show progress
+        downloadProgress.visibility = View.VISIBLE
+        downloadProgress.progress = 0
+        downloadButton.isEnabled = false
+        downloadButton.text = "⏳"
+        
+        // Cache landmark metadata first
+        val metadataCached = offlineDataCache.cacheLandmarksData()
+        
+        if (metadataCached) {
+            downloadProgress.progress = 30
+            
+            // Check if map tiles already downloaded
+            offlineMapManager.checkOfflineRegionExists { exists, size ->
+                runOnUiThread {
+                    if (exists) {
+                        // Already have offline maps
+                        downloadProgress.progress = 100
+                        completeOfflineDownload(true, "Cache updated! Maps: ${size/1024/1024}MB")
+                    } else {
+                        // Download map tiles
+                        downloadProgress.progress = 40
+                        offlineMapManager.downloadArizonaRoute66Region(
+                            onProgress = { progress ->
+                                runOnUiThread {
+                                    downloadProgress.progress = (40 + progress * 0.6).toInt()
+                                }
+                            },
+                            onComplete = { success, message ->
+                                runOnUiThread {
+                                    completeOfflineDownload(success, message)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        } else {
+            completeOfflineDownload(false, "Failed to cache metadata")
+        }
+    }
+    
+    /**
+     * C1: Complete offline download process
+     */
+    private fun completeOfflineDownload(success: Boolean, message: String) {
+        downloadProgress.visibility = View.GONE
+        downloadButton.isEnabled = true
+        updateOfflineStatusUI()
+        
+        if (success) {
+            Toast.makeText(this, "✅ $message", Toast.LENGTH_LONG).show()
+            Log.d(TAG, "Offline cache complete: $message")
+        } else {
+            Toast.makeText(this, "❌ $message", Toast.LENGTH_LONG).show()
+            Log.e(TAG, "Offline cache failed: $message")
+        }
+    }
+    
+    /**
+     * C1: Initialize offline cache on startup
+     */
+    private fun initializeOfflineCache() {
+        if (!offlineDataCache.isCacheValid()) {
+            // Auto-cache on first launch if online
+            if (isOnline) {
+                offlineDataCache.cacheLandmarksData()
+                Log.d(TAG, "Initial offline cache created")
+            }
+        } else {
+            val cacheInfo = offlineDataCache.getCacheInfo()
+            Log.d(TAG, "Offline cache loaded: ${cacheInfo.itemCount} items, last updated: ${cacheInfo.lastUpdated}")
+        }
     }
     
     /**
      * Create the Geofence Monitor UI overlay
      */
     private fun createGeofenceMonitorUI(rootLayout: FrameLayout) {
-        // Toggle button at top right
+        // Toggle button at top right (adjusted for status bar)
         toggleButton = Button(this).apply {
-            text = "📍 Show Monitor"
+            text = "📍 Monitor"
             setBackgroundColor(Color.parseColor("#2196F3"))
             setTextColor(Color.WHITE)
             setPadding(24, 16, 24, 16)
-            textSize = 12f
+            textSize = 11f
             setOnClickListener { toggleMonitorPanel() }
         }
         
@@ -181,7 +440,7 @@ class MainActivity : ComponentActivity() {
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            topMargin = 48
+            topMargin = 100 // Below status bar
             rightMargin = 16
         }
         rootLayout.addView(toggleButton, toggleParams)
@@ -296,11 +555,11 @@ class MainActivity : ComponentActivity() {
         isMonitorVisible = !isMonitorVisible
         if (isMonitorVisible) {
             monitorPanel.visibility = View.VISIBLE
-            toggleButton.text = "✕ Hide Monitor"
+            toggleButton.text = "✕ Hide"
             toggleButton.setBackgroundColor(Color.parseColor("#F44336"))
         } else {
             monitorPanel.visibility = View.GONE
-            toggleButton.text = "📍 Show Monitor"
+            toggleButton.text = "📍 Monitor"
             toggleButton.setBackgroundColor(Color.parseColor("#2196F3"))
         }
     }
@@ -625,6 +884,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(geofenceReceiver)
+        connectivityManager.unregisterNetworkCallback(networkCallback)
         geofenceManager.removeAllGeofences()
         if (::mapView.isInitialized) mapView.onDestroy()
     }
