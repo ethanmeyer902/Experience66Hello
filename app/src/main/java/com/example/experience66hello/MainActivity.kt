@@ -46,6 +46,10 @@ import java.util.Date
 import java.util.Locale
 import android.net.Uri
 
+import android.speech.tts.TextToSpeech
+
+
+
 
 class MainActivity : ComponentActivity() {
 
@@ -85,7 +89,27 @@ class MainActivity : ComponentActivity() {
     // Network callback for connectivity monitoring
     private lateinit var connectivityManager: ConnectivityManager
     private lateinit var networkCallback: ConnectivityManager.NetworkCallback
-    
+
+    // Text-to-Speech
+    private var tts: TextToSpeech? = null
+    private var isTtsReady = false
+    // Destination for the Navigate button
+    private var currentDestinationPoint: Point? = null
+
+    // Currently shown landmark ID (for geofence EXIT, etc.)
+    private var currentLandmarkId: String? = null
+
+    // POI detail card
+    private lateinit var detailCard: LinearLayout
+    private lateinit var detailTitleText: TextView
+    private lateinit var detailDescriptionText: TextView
+    private lateinit var detailExtraText: TextView
+    private lateinit var detailCloseButton: Button
+    private lateinit var detailListenButton: Button
+
+    // Map annotation → landmark mapping for marker clicks
+    private val landmarkByAnnotationId = mutableMapOf<String, Route66Landmark>()
+
     data class GeofenceEvent(
         val landmarkId: String,
         val landmarkName: String,
@@ -134,6 +158,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        //initialize TTS
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                val result = tts?.setLanguage(Locale.US)
+                isTtsReady = result != TextToSpeech.LANG_MISSING_DATA &&
+                        result != TextToSpeech.LANG_NOT_SUPPORTED
+            } else {
+                isTtsReady = false
+            }
+        }
+
+
         // Initialize managers
         geofenceManager = GeofenceManager(this)
         offlineMapManager = OfflineMapManager(this)
@@ -157,7 +193,10 @@ class MainActivity : ComponentActivity() {
         
         // Create and add Geofence Monitor UI
         createGeofenceMonitorUI(rootLayout)
-        
+
+        // Create and add POI detail card
+        createLandmarkDetailCard(rootLayout)
+
         setContentView(rootLayout)
 
         // Set camera to show Arizona Route 66 corridor
@@ -622,8 +661,21 @@ class MainActivity : ComponentActivity() {
         pointAnnotationManager = annotationPlugin.createPointAnnotationManager().apply {
             // When the user taps a marker, start navigation to that point
             addClickListener { annotation ->
-                startNavigationTo(annotation.point)
-                true // tell Mapbox we handled the click
+                val landmark = landmarkByAnnotationId[annotation.id]
+                if (landmark != null) {
+                    // Optional: move camera closer
+                    mapView.mapboxMap.setCamera(
+                        CameraOptions.Builder()
+                            .center(annotation.point)
+                            .zoom(12.0)
+                            .build()
+                    )
+                    showLandmarkCard(landmark.id)
+                }
+                true
+
+            //    startNavigationTo(annotation.point)
+            //    true // tell Mapbox we handled the click
             }
         }
 
@@ -662,8 +714,11 @@ class MainActivity : ComponentActivity() {
                 .withTextField(landmark.name)
                 .withTextOffset(listOf(0.0, 2.0))
                 .withTextSize(10.0)
-            
-            pointAnnotationManager?.create(markerOptions)
+
+            val annotation = pointAnnotationManager?.create(markerOptions)
+            if (annotation != null) {
+                landmarkByAnnotationId[annotation.id] = landmark
+            }
         }
         
         Log.d(TAG, "Added ${ArizonaLandmarks.landmarks.size} landmark markers")
@@ -800,6 +855,7 @@ class MainActivity : ComponentActivity() {
                 activeLandmarks.add(landmarkId)
                 highlightLandmark(landmarkId, true)
                 showEntryNotification(landmarkName)
+                showLandmarkCard(landmarkId)
             }
             "EXIT" -> {
                 activeLandmarks.remove(landmarkId)
@@ -808,6 +864,7 @@ class MainActivity : ComponentActivity() {
             }
             "DWELL" -> {
                 showDwellNotification(landmarkName)
+
             }
         }
         
@@ -865,6 +922,9 @@ class MainActivity : ComponentActivity() {
             Toast.LENGTH_SHORT
         ).show()
     }
+    /**
+     * Start navigation to a landmark
+     */
     private fun startNavigationTo(destination: Point) {
         val lat = destination.latitude()
         val lon = destination.longitude()
@@ -887,8 +947,192 @@ class MainActivity : ComponentActivity() {
             startActivity(browserIntent)
         }
     }
+    /**
+     * Bottom card that shows POI details and has a "Listen" button
+     */
+    private fun createLandmarkDetailCard(rootLayout: FrameLayout) {
+        detailCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(24, 24, 24, 24)
+            elevation = 12f
+            visibility = View.GONE // hidden until we show a landmark
+        }
+
+        // Title
+        detailTitleText = TextView(this).apply {
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#212121"))
+        }
+        detailCard.addView(detailTitleText)
+
+        // Description
+        detailDescriptionText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#424242"))
+            setPadding(0, 8, 0, 8)
+        }
+        detailCard.addView(detailDescriptionText)
+
+        // Extra / historical notes
+        detailExtraText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#616161"))
+            setPadding(0, 4, 0, 12)
+        }
+        detailCard.addView(detailExtraText)
+
+        // Buttons row
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+
+        // "Listen" button
+        detailListenButton = Button(this).apply {
+            text = "🔊 Listen"
+            setOnClickListener {
+                readCurrentLandmark()
+            }
+        }
+        buttonRow.addView(detailListenButton)
+
+            // Navigate button
+        val navigateButton = Button(this).apply {
+            text = "Navigate"
+                setOnClickListener {
+                    val dest = currentDestinationPoint
+                    if (dest != null) {
+                        startNavigationTo(dest)   // uses your existing function
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "No navigation target available",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+        }
+        buttonRow.addView(navigateButton)
+
+        // Close button
+        detailCloseButton = Button(this).apply {
+            text = "✕ Close"
+                setOnClickListener {
+                    hideLandmarkCard()
+                }
+        }
+        buttonRow.addView(detailCloseButton)
+
+        detailCard.addView(buttonRow)
+
+        // Attach to bottom of rootLayout
+        val params = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM
+                leftMargin = 16
+                rightMargin = 16
+                bottomMargin = 32
+        }
+
+        rootLayout.addView(detailCard, params)
+        }
 
 
+    /**
+     * Show details for the given landmark ID and read it aloud.
+     */
+    private fun showLandmarkCard(landmarkId: String) {
+        currentLandmarkId = landmarkId
+
+        // Try to get cached offline data first
+        val cached = offlineDataCache
+            .getCachedLandmarks()
+            .firstOrNull { it.id == landmarkId }
+
+        val title: String
+        val description: String
+        val extra: String
+
+        if (cached != null) {
+            title = cached.name
+            description = cached.description
+            extra = "${cached.historicalNotes}\nEstablished: ${cached.yearEstablished}"
+        } else {
+            // Fallback to in-memory landmarks
+            val lm = ArizonaLandmarks.landmarks.firstOrNull { it.id == landmarkId }
+            title = lm?.name ?: "Unknown Landmark"
+            description = lm?.description ?: ""
+            extra = ""
+        }
+
+        detailTitleText.text = title
+        detailDescriptionText.text = description
+        detailExtraText.text = extra
+
+        detailCard.visibility = View.VISIBLE
+
+        //save where to navigate
+        val lm = ArizonaLandmarks.findById(landmarkId)
+        currentDestinationPoint = lm?.toPoint()
+
+        // Auto read when opened (if you want; you can remove this line to only read on button press)
+        readTextForLandmark(title, description, extra)
+    }
+
+    /**
+     * Hide the card and stop any speech.
+     */
+    private fun hideLandmarkCard() {
+        detailCard.visibility = View.GONE
+        tts?.stop()
+    }
+
+    /**
+     * Build full narration text and send it to Text-to-Speech.
+     */
+    private fun readTextForLandmark(
+        title: String,
+        description: String,
+        extra: String
+    ) {
+        if (!isTtsReady || tts == null) {
+            Toast.makeText(this, "Voice not ready yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val textToSpeak = buildString {
+            append(title).append(". ")
+            append(description)
+            if (extra.isNotBlank()) {
+                append(". ").append(extra)
+            }
+        }
+
+        tts?.stop()
+        tts?.speak(
+            textToSpeak,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "LANDMARK_TTS"
+        )
+    }
+
+    /**
+     * Called when the user taps the "🔊 Read this" button.
+     */
+    private fun readCurrentLandmark() {
+        val title = detailTitleText.text?.toString().orEmpty()
+        val description = detailDescriptionText.text?.toString().orEmpty()
+        val extra = detailExtraText.text?.toString().orEmpty()
+
+        if (title.isNotBlank() || description.isNotBlank()) {
+            readTextForLandmark(title, description, extra)
+        }
+    }
 
     /**
      * Log geofence events for demo inspection
@@ -908,7 +1152,7 @@ class MainActivity : ComponentActivity() {
             ╚══════════════════════════════════════
         """.trimIndent())
     }
-    
+
     /**
      * Get event log for demo purposes
      */
@@ -937,9 +1181,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
         unregisterReceiver(geofenceReceiver)
         connectivityManager.unregisterNetworkCallback(networkCallback)
         geofenceManager.removeAllGeofences()
+
+        //TTS cleanup
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
+
         if (::mapView.isInitialized) mapView.onDestroy()
     }
 }
