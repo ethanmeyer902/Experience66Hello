@@ -44,6 +44,8 @@ import com.mapbox.maps.plugin.locationcomponent.location
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import android.net.Uri
+
 
 class MainActivity : ComponentActivity() {
 
@@ -612,12 +614,23 @@ class MainActivity : ComponentActivity() {
         eventLogTextView.text = sb.toString()
         eventLogTextView.setTextColor(Color.parseColor("#212121"))
     }
-    
+
     private fun setupAnnotationManagers() {
         val annotationPlugin = mapView.annotations
-        pointAnnotationManager = annotationPlugin.createPointAnnotationManager()
+
+        // Point markers (Route 66 landmarks)
+        pointAnnotationManager = annotationPlugin.createPointAnnotationManager().apply {
+            // When the user taps a marker, start navigation to that point
+            addClickListener { annotation ->
+                startNavigationTo(annotation.point)
+                true // tell Mapbox we handled the click
+            }
+        }
+
+        // Geofence circles
         circleAnnotationManager = annotationPlugin.createCircleAnnotationManager()
     }
+
 
     /**
      * Add markers for all Arizona Route 66 landmarks
@@ -852,7 +865,31 @@ class MainActivity : ComponentActivity() {
             Toast.LENGTH_SHORT
         ).show()
     }
-    
+    private fun startNavigationTo(destination: Point) {
+        val lat = destination.latitude()
+        val lon = destination.longitude()
+
+        // Try Google Maps navigation app first
+        val gmmIntentUri = Uri.parse("google.navigation:q=$lat,$lon&mode=d")
+        val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
+            setPackage("com.google.android.apps.maps")
+        }
+
+        if (mapIntent.resolveActivity(packageManager) != null) {
+            // Google Maps app is installed
+            startActivity(mapIntent)
+        } else {
+            // Fallback to browser directions if app is not installed
+            val browserUri = Uri.parse(
+                "https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=driving"
+            )
+            val browserIntent = Intent(Intent.ACTION_VIEW, browserUri)
+            startActivity(browserIntent)
+        }
+    }
+
+
+
     /**
      * Log geofence events for demo inspection
      */
