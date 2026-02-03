@@ -13,14 +13,15 @@ import com.google.android.gms.location.GeofencingRequest
 import com.google.android.gms.location.LocationServices
 
 /**
- * Manages geofence registration and monitoring for Route 66 landmarks
+ * Handles geofence registration and monitoring for Route 66 landmarks
+ * Notifies the app when users enter, exit, or spend time near POIs
  */
 class GeofenceManager(private val context: Context) {
     
     companion object {
         const val TAG = "GeofenceManager"
         private const val GEOFENCE_EXPIRATION_MS = Geofence.NEVER_EXPIRE
-        private const val LOITERING_DELAY_MS = 30000 // 30 seconds for DWELL
+        private const val LOITERING_DELAY_MS = 30000 // Wait 30 seconds before triggering DWELL event
     }
     
     private val geofencingClient: GeofencingClient = LocationServices.getGeofencingClient(context)
@@ -36,7 +37,8 @@ class GeofenceManager(private val context: Context) {
     }
     
     /**
-     * Register all Arizona Route 66 landmarks as geofences
+     * Registers all Route 66 landmarks as geofences
+     * Limited to 100 geofences (Google's maximum) to prevent performance issues
      */
     fun registerAllGeofences(
         onSuccess: () -> Unit = {},
@@ -48,7 +50,20 @@ class GeofenceManager(private val context: Context) {
             return
         }
         
-        val geofenceList = ArizonaLandmarks.landmarks.map { landmark ->
+        // Limit geofences to prevent performance issues (Google allows max 100 geofences)
+        // Filter to Arizona landmarks and limit to 100
+        val arizonaLandmarks = ArizonaLandmarks.landmarks.filter { landmark ->
+            landmark.latitude in 31.0..37.0 && landmark.longitude in -115.0..-109.0
+        }
+        
+        val landmarksToRegister = if (arizonaLandmarks.size > 100) {
+            Log.w(TAG, "Too many landmarks (${arizonaLandmarks.size}), registering first 100 geofences")
+            arizonaLandmarks.take(100)
+        } else {
+            arizonaLandmarks
+        }
+        
+        val geofenceList = landmarksToRegister.map { landmark ->
             createGeofence(landmark)
         }
         
@@ -74,7 +89,8 @@ class GeofenceManager(private val context: Context) {
     }
     
     /**
-     * Create a Geofence object from a Route66Landmark
+     * Creates a geofence object for a landmark
+     * Triggers when user enters, exits, or spends time in the area
      */
     private fun createGeofence(landmark: Route66Landmark): Geofence {
         return Geofence.Builder()
@@ -95,7 +111,8 @@ class GeofenceManager(private val context: Context) {
     }
     
     /**
-     * Remove all registered geofences
+     * Removes all registered geofences
+     * Useful when the app is closing or needs to reset
      */
     fun removeAllGeofences(
         onSuccess: () -> Unit = {},

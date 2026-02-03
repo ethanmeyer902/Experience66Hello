@@ -5,9 +5,9 @@ import android.content.SharedPreferences
 import android.util.Log
 
 /**
- * C1: Simplified Offline Map Manager
- * Tracks offline map download status for demo purposes
- * (Full Mapbox offline tile caching requires additional SDK setup)
+ * Manages offline map downloads for the Route 66 area
+ * Currently simulates downloads for demo purposes
+ * In production, this would use Mapbox's offline tile caching
  */
 class OfflineMapManager(context: Context) {
 
@@ -23,7 +23,8 @@ class OfflineMapManager(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
-     * Check if offline maps are "downloaded" (simulated for demo)
+     * Checks if offline maps have been downloaded
+     * Returns the download status and file size
      */
     fun checkOfflineRegionExists(callback: (exists: Boolean, sizeBytes: Long) -> Unit) {
         val exists = prefs.getBoolean(KEY_MAPS_DOWNLOADED, false)
@@ -33,8 +34,8 @@ class OfflineMapManager(context: Context) {
     }
 
     /**
-     * Simulate downloading Arizona Route 66 map tiles
-     * In a real app, this would use Mapbox OfflineManager API
+     * Simulates downloading map tiles for the Arizona Route 66 area
+     * Shows progress and marks maps as downloaded when complete
      */
     fun downloadArizonaRoute66Region(
         onProgress: (Double) -> Unit,
@@ -50,8 +51,8 @@ class OfflineMapManager(context: Context) {
                     onProgress(i.toDouble())
                 }
                 
-                // Mark as downloaded
-                val simulatedSize = 75L * 1024 * 1024 // ~75 MB simulated
+                // Mark maps as downloaded with simulated file size
+                val simulatedSize = 75L * 1024 * 1024 // Approximately 75 MB
                 prefs.edit()
                     .putBoolean(KEY_MAPS_DOWNLOADED, true)
                     .putLong(KEY_DOWNLOAD_SIZE, simulatedSize)
@@ -69,7 +70,7 @@ class OfflineMapManager(context: Context) {
     }
 
     /**
-     * Delete offline maps
+     * Deletes the downloaded offline maps
      */
     fun deleteOfflineRegion(callback: (success: Boolean) -> Unit) {
         prefs.edit()
@@ -83,7 +84,7 @@ class OfflineMapManager(context: Context) {
     }
 
     /**
-     * Get offline map info
+     * Gets information about the downloaded offline maps
      */
     fun getOfflineInfo(): OfflineMapInfo {
         return OfflineMapInfo(
