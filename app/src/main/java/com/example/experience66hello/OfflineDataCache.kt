@@ -10,8 +10,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * C1: Offline Data Cache for CONTENTdm/Landmark metadata
- * Stores landmark data locally for offline access
+ * Caches landmark data locally so the app works offline
+ * Stores POI information in SharedPreferences for quick access
  */
 class OfflineDataCache(context: Context) {
 
@@ -28,7 +28,7 @@ class OfflineDataCache(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
-     * Cache all landmark data for offline use
+     * Saves all landmark data to local storage for offline access
      */
     fun cacheLandmarksData(): Boolean {
         return try {
@@ -42,7 +42,7 @@ class OfflineDataCache(context: Context) {
                     put("latitude", landmark.latitude)
                     put("longitude", landmark.longitude)
                     put("radius_meters", landmark.radiusMeters)
-                    // Simulated CONTENTdm metadata
+                    // Add historical information for each landmark
                     put("historical_notes", getHistoricalNotes(landmark.id))
                     put("year_established", getYearEstablished(landmark.id))
                     put("content_dm_id", "RT66-AZ-${landmark.id.uppercase()}")
@@ -66,7 +66,8 @@ class OfflineDataCache(context: Context) {
     }
 
     /**
-     * Get cached landmark data (works offline)
+     * Retrieves cached landmark data from local storage
+     * Works even when the device is offline
      */
     fun getCachedLandmarks(): List<CachedLandmarkData> {
         val jsonString = prefs.getString(KEY_LANDMARKS_DATA, null) ?: return emptyList()
@@ -99,7 +100,7 @@ class OfflineDataCache(context: Context) {
     }
 
     /**
-     * Check if cache exists and is valid
+     * Checks if we have valid cached data available
      */
     fun isCacheValid(): Boolean {
         val version = prefs.getInt(KEY_CACHE_VERSION, 0)
@@ -108,7 +109,7 @@ class OfflineDataCache(context: Context) {
     }
 
     /**
-     * Get cache info for UI display
+     * Gets information about the cache for display in the UI
      */
     fun getCacheInfo(): CacheInfo {
         val landmarks = getCachedLandmarks()
@@ -127,14 +128,14 @@ class OfflineDataCache(context: Context) {
     }
 
     /**
-     * Clear all cached data
+     * Deletes all cached data from local storage
      */
     fun clearCache() {
         prefs.edit().clear().apply()
         Log.d(TAG, "Cache cleared")
     }
 
-    // Simulated CONTENTdm historical notes
+    // Historical information for each landmark
     private fun getHistoricalNotes(landmarkId: String): String {
         return when (landmarkId) {
             "oatman" -> "Gold discovered 1915. Clark Gable & Carole Lombard honeymooned at Oatman Hotel, 1939."

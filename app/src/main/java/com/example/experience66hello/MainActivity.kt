@@ -25,6 +25,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.EditText
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
@@ -45,12 +46,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.net.Uri
-
 import android.speech.tts.TextToSpeech
 
-
-
-
+/**
+ * Main activity for Route 66 Experience app
+ * Handles map display, POI search, geofencing, and archive integration
+ */
 class MainActivity : ComponentActivity() {
 
     companion object {
@@ -61,24 +62,26 @@ class MainActivity : ComponentActivity() {
     private lateinit var geofenceManager: GeofenceManager
     private lateinit var offlineMapManager: OfflineMapManager
     private lateinit var offlineDataCache: OfflineDataCache
+    private lateinit var archiveRepository: ArchiveRepository
+    private lateinit var route66DatabaseRepository: Route66DatabaseRepository
     
     private var pointAnnotationManager: PointAnnotationManager? = null
     private var circleAnnotationManager: CircleAnnotationManager? = null
     
-    // Track which landmarks user is currently inside
+    // Track which landmarks the user is currently inside
     private val activeLandmarks = mutableSetOf<String>()
     
-    // Geofence event log for demo purposes
+    // Log of geofence events (enter/exit/dwell)
     private val geofenceEventLog = mutableListOf<GeofenceEvent>()
     
-    // UI Components for Geofence Monitor
+    // UI components for the geofence monitor panel
     private lateinit var monitorPanel: LinearLayout
     private lateinit var geofenceListTextView: TextView
     private lateinit var eventLogTextView: TextView
     private lateinit var toggleButton: Button
     private var isMonitorVisible = false
     
-    // C1: Offline Status UI Components
+    // UI components for offline status bar
     private lateinit var offlineStatusBar: LinearLayout
     private lateinit var offlineStatusText: TextView
     private lateinit var offlineStatusIcon: TextView
@@ -86,29 +89,54 @@ class MainActivity : ComponentActivity() {
     private lateinit var downloadProgress: ProgressBar
     private var isOnline = true
     
-    // Network callback for connectivity monitoring
+    // Network monitoring to detect when device goes offline
     private lateinit var connectivityManager: ConnectivityManager
     private lateinit var networkCallback: ConnectivityManager.NetworkCallback
 
-    // Text-to-Speech
+    // Text-to-Speech for reading landmark descriptions
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
-    // Destination for the Navigate button
+    
+    // Current navigation destination point
     private var currentDestinationPoint: Point? = null
 
-    // Currently shown landmark ID (for geofence EXIT, etc.)
+    // ID of the landmark currently being displayed
     private var currentLandmarkId: String? = null
+    
+    // Archive items matched to the current landmark (used by About button)
+    private var currentLandmarkArchiveItems: List<Route66ArchiveItem> = emptyList()
 
-    // POI detail card
+    // POI detail card UI components
     private lateinit var detailCard: LinearLayout
     private lateinit var detailTitleText: TextView
     private lateinit var detailDescriptionText: TextView
     private lateinit var detailExtraText: TextView
     private lateinit var detailCloseButton: Button
     private lateinit var detailListenButton: Button
+    private lateinit var detailAboutButton: Button
 
     // Map annotation → landmark mapping for marker clicks
     private val landmarkByAnnotationId = mutableMapOf<String, Route66Landmark>()
+    
+    // Search UI Components
+    private lateinit var searchBar: EditText
+    private lateinit var searchButton: Button
+    private lateinit var searchResultsPanel: LinearLayout
+    private lateinit var searchResultsScrollView: ScrollView
+    private lateinit var searchResultsContainer: LinearLayout
+    private lateinit var searchPanel: LinearLayout
+    private var isSearchVisible = false
+    private var currentSearchResults: List<Route66ArchiveItem> = emptyList()
+    
+    // Archive Item Detail Card
+    private lateinit var archiveDetailCard: LinearLayout
+    private lateinit var archiveDetailTitle: TextView
+    private lateinit var archiveDetailCallNumber: TextView
+    private lateinit var archiveDetailContentDm: TextView
+    private lateinit var archiveDetailItemNumber: TextView
+    private lateinit var archiveDetailUrl: TextView
+    private lateinit var archiveOpenButton: Button
+    private lateinit var archiveCloseButton: Button
 
     data class GeofenceEvent(
         val landmarkId: String,
@@ -174,6 +202,11 @@ class MainActivity : ComponentActivity() {
         geofenceManager = GeofenceManager(this)
         offlineMapManager = OfflineMapManager(this)
         offlineDataCache = OfflineDataCache(this)
+        archiveRepository = ArchiveRepository(this)
+        route66DatabaseRepository = Route66DatabaseRepository(this)
+        
+        // Load Route 66 Database and initialize landmarks
+        loadRoute66Database()
         
         // Initialize network monitoring
         setupNetworkMonitoring()
@@ -190,6 +223,9 @@ class MainActivity : ComponentActivity() {
         
         // C1: Create offline status bar at top
         createOfflineStatusBar(rootLayout)
+        
+        // Create search UI
+        createSearchUI(rootLayout)
         
         // Create and add Geofence Monitor UI
         createGeofenceMonitorUI(rootLayout)
@@ -210,8 +246,8 @@ class MainActivity : ComponentActivity() {
         // Load Mapbox style and initialize features
         mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) {
             setupAnnotationManagers()
-            addAllLandmarkMarkers()
-            drawAllGeofenceCircles()
+            // Landmarks will be loaded from CSV in background thread
+            // Markers will be added after database loads (see loadRoute66Database)
             requestLocationPermissions()
         }
         
@@ -232,6 +268,96 @@ class MainActivity : ComponentActivity() {
         
         // C1: Initialize offline cache on startup
         initializeOfflineCache()
+        
+        // Preload archive data in background
+        Thread {
+            archiveRepository.loadArchiveData()
+            Log.d(TAG, "Archive data preloaded")
+        }.start()
+    }
+    
+    /**
+     * Load Route 66 Database from CSV and initialize landmarks
+     */
+    private fun loadRoute66Database() {
+        runOnUiThread {
+            Toast.makeText(this, "Loading Route 66 Database...", Toast.LENGTH_SHORT).show()
+        }
+        
+        Thread {
+            try {
+                val startTime = System.currentTimeMillis()
+                Log.d(TAG, "Starting database load in background thread...")
+                
+                route66DatabaseRepository.loadDatabase()
+                val landmarks = route66DatabaseRepository.getAllLandmarks()
+                
+                val loadTime = System.currentTimeMillis() - startTime
+                Log.d(TAG, "Database load completed in ${loadTime}ms, loaded ${landmarks.size} landmarks")
+                
+                if (landmarks.isEmpty()) {
+                    Log.w(TAG, "No landmarks loaded from database!")
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            "Warning: No POIs loaded. Check CSV file.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@Thread
+                }
+                
+                runOnUiThread {
+                    // Initialize ArizonaLandmarks with loaded data
+                    ArizonaLandmarks.initialize(landmarks)
+                    
+                    Log.d(TAG, "Loaded ${landmarks.size} landmarks from Route 66 Database")
+                    
+                    Toast.makeText(
+                        this,
+                        "Loaded ${landmarks.size} POIs",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    
+                    // Update map markers and geofences if map is already loaded
+                    if (::mapView.isInitialized) {
+                        mapView.mapboxMap.getStyle { style ->
+                            // Clear existing markers and circles
+                            pointAnnotationManager?.deleteAll()
+                            circleAnnotationManager?.deleteAll()
+                            landmarkByAnnotationId.clear()
+                            
+                            // Add new markers and circles (limited to prevent freeze)
+                            setupAnnotationManagers()
+                            addAllLandmarkMarkers()
+                            drawAllGeofenceCircles()
+                            
+                            // Update geofence monitor display
+                            updateGeofenceListDisplay()
+                            
+                            // Re-register geofences with new landmarks (limited to 100)
+                            if (ActivityCompat.checkSelfPermission(
+                                    this,
+                                    Manifest.permission.ACCESS_FINE_LOCATION
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                initializeGeofencing()
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error loading Route 66 Database: ${e.message}", e)
+                e.printStackTrace()
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Error loading database: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
     }
     
     /**
@@ -463,6 +589,573 @@ class MainActivity : ComponentActivity() {
     }
     
     /**
+     * Create search UI for POI/archive search
+     */
+    private fun createSearchUI(rootLayout: FrameLayout) {
+        // Search panel container
+        searchPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(16, 12, 16, 12)
+            elevation = 8f
+            visibility = View.GONE // Initially hidden
+        }
+        
+        // Search bar row
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        
+        // Search input field
+        searchBar = EditText(this).apply {
+            hint = "Search POI or Call Number..."
+            textSize = 14f
+            setPadding(16, 12, 16, 12)
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                marginEnd = 8
+            }
+            setOnEditorActionListener { _, _, _ ->
+                performSearch()
+                true
+            }
+        }
+        searchRow.addView(searchBar)
+        
+        // Search button
+        searchButton = Button(this).apply {
+            text = "🔍"
+            setBackgroundColor(Color.parseColor("#2196F3"))
+            setTextColor(Color.WHITE)
+            setPadding(16, 12, 16, 12)
+            textSize = 14f
+            setOnClickListener { performSearch() }
+        }
+        searchRow.addView(searchButton)
+        
+        // Close button
+        val closeButton = Button(this).apply {
+            text = "✕"
+            setBackgroundColor(Color.parseColor("#F44336"))
+            setTextColor(Color.WHITE)
+            setPadding(16, 12, 16, 12)
+            textSize = 14f
+            setOnClickListener { toggleSearchPanel() }
+        }
+        searchRow.addView(closeButton)
+        
+        searchPanel.addView(searchRow)
+        
+        // Results scroll view with container for clickable items
+        searchResultsScrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                500  // Increased height to show more archive items
+            ).apply {
+                topMargin = 12
+            }
+        }
+        
+        searchResultsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 12, 12, 12)
+            setBackgroundColor(Color.parseColor("#FAFAFA"))
+        }
+        searchResultsScrollView.addView(searchResultsContainer)
+        searchPanel.addView(searchResultsScrollView)
+        
+        // Add search panel to root layout
+        val searchParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP
+            topMargin = 60 // Below status bar
+            leftMargin = 16
+            rightMargin = 16
+        }
+        rootLayout.addView(searchPanel, searchParams)
+        
+        // Create archive item detail card
+        createArchiveDetailCard(rootLayout)
+        
+        // Add search toggle button (positioned to left of monitor button)
+        val searchToggleButton = Button(this).apply {
+            text = "🔍 Search"
+            setBackgroundColor(Color.parseColor("#FF9800"))
+            setTextColor(Color.WHITE)
+            setPadding(24, 16, 24, 16)
+            textSize = 11f
+            setOnClickListener { toggleSearchPanel() }
+        }
+        
+        val searchToggleParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = 100
+            rightMargin = 140 // Position to left of monitor button (which is at rightMargin 16)
+        }
+        rootLayout.addView(searchToggleButton, searchToggleParams)
+    }
+    
+    /**
+     * Toggle search panel visibility
+     */
+    private fun toggleSearchPanel() {
+        isSearchVisible = !isSearchVisible
+        searchPanel.visibility = if (isSearchVisible) View.VISIBLE else View.GONE
+        if (!isSearchVisible) {
+            searchBar.setText("")
+            searchResultsContainer.removeAllViews()
+            hideArchiveDetailCard()
+        }
+    }
+    
+    /**
+     * Perform search for POI or call number
+     */
+    private fun performSearch() {
+        val query = searchBar.text.toString().trim()
+        
+        if (query.isBlank()) {
+            Toast.makeText(this, "Please enter a search term", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        // Show loading
+        searchResultsContainer.removeAllViews()
+        val loadingText = TextView(this).apply {
+            text = "🔍 Searching..."
+            textSize = 14f
+            setTextColor(Color.parseColor("#616161"))
+            setPadding(16, 16, 16, 16)
+            gravity = Gravity.CENTER
+        }
+        searchResultsContainer.addView(loadingText)
+        
+        // Perform search on background thread
+        Thread {
+            try {
+                Log.d(TAG, "Starting search for: '$query'")
+                val results = archiveRepository.searchByPoi(query)
+                Log.d(TAG, "Search completed, found ${results.size} results")
+                
+                runOnUiThread {
+                    if (results.isEmpty()) {
+                        Log.w(TAG, "No results found, checking if archive is loaded...")
+                        val itemCount = archiveRepository.getItemCount()
+                        Log.d(TAG, "Total archive items available: $itemCount")
+                    }
+                    displaySearchResults(query, results)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during search: ${e.message}", e)
+                runOnUiThread {
+                    val errorText = TextView(this@MainActivity).apply {
+                        text = "❌ Error searching: ${e.message}\n\nPlease try again or check logs."
+                        setTextColor(Color.parseColor("#F44336"))
+                        textSize = 12f
+                        setPadding(16, 16, 16, 16)
+                    }
+                    searchResultsContainer.removeAllViews()
+                    searchResultsContainer.addView(errorText)
+                }
+            }
+        }.start()
+    }
+    
+    /**
+     * Display search results as clickable items
+     */
+    private fun displaySearchResults(query: String, results: List<Route66ArchiveItem>) {
+        currentSearchResults = results
+        searchResultsContainer.removeAllViews()
+        
+        if (results.isEmpty()) {
+            val noResultsText = TextView(this).apply {
+                text = "❌ No results found for '$query'\n\n" +
+                        "💡 Try searching for:\n" +
+                        "• POI names: 'Oatman', 'Kingman', 'Flagstaff', 'Winslow'\n" +
+                        "• Call numbers: 'NAU.PH.2004', 'NAU.PH.2010'\n" +
+                        "• Landmark IDs: 'oatman', 'kingman', 'flagstaff'\n\n" +
+                        "📊 Total archive items: ${archiveRepository.getItemCount()}"
+                setTextColor(Color.parseColor("#F44336"))
+                textSize = 12f
+                setPadding(16, 16, 16, 16)
+            }
+            searchResultsContainer.addView(noResultsText)
+            return
+        }
+        
+        // Check if this is a POI search and show landmark info
+        val searchTerm = query.lowercase().trim()
+        val matchingLandmark = route66DatabaseRepository.searchLandmarks(query).firstOrNull()
+            ?: ArizonaLandmarks.landmarks.find { landmark ->
+                landmark.name.lowercase().contains(searchTerm) ||
+                landmark.id.lowercase().contains(searchTerm) ||
+                searchTerm.contains(landmark.name.lowercase()) ||
+                searchTerm.contains(landmark.id.lowercase())
+            }
+        
+        // If POI found, navigate map to that location and find matching archive items
+        if (matchingLandmark != null) {
+            // Navigate map camera to the POI location
+            mapView.mapboxMap.setCamera(
+                CameraOptions.Builder()
+                    .center(Point.fromLngLat(matchingLandmark.longitude, matchingLandmark.latitude))
+                    .zoom(14.0) // Zoom in close to the POI
+                    .build()
+            )
+            
+            // Highlight the landmark on the map
+            highlightLandmark(matchingLandmark.id, true)
+            
+            // Find archive items that match this POI using call number matching
+            Thread {
+                val matchedItems = findArchiveItemsForLandmark(matchingLandmark)
+                runOnUiThread {
+                    currentLandmarkArchiveItems = matchedItems
+                    if (matchedItems.isNotEmpty()) {
+                        Log.d(TAG, "Found ${matchedItems.size} archive items for ${matchingLandmark.name}")
+                    }
+                }
+            }.start()
+            
+            Log.d(TAG, "Navigated map to ${matchingLandmark.name} at (${matchingLandmark.latitude}, ${matchingLandmark.longitude})")
+        }
+        
+        // Header with landmark info if found
+        val headerText = if (matchingLandmark != null) {
+            TextView(this).apply {
+                text = "📍 ${matchingLandmark.name}\n" +
+                       "${matchingLandmark.description}\n" +
+                       "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                       "📚 CONTENTdm Archive Database (${results.size} items):\n" +
+                       "🔗 All items linked to Call Numbers"
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#1976D2"))
+                setPadding(12, 12, 12, 12)
+                setBackgroundColor(Color.parseColor("#E3F2FD"))
+            }
+        } else {
+            TextView(this).apply {
+                text = "✅ Found ${results.size} result(s) for '$query'\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#1976D2"))
+                setPadding(12, 8, 12, 12)
+            }
+        }
+        searchResultsContainer.addView(headerText)
+        
+        // Always show all archive items when POI is found - this is the "database"
+        if (results.isNotEmpty()) {
+            // Create clickable result items for all results
+            results.take(50).forEachIndexed { index, item ->
+                val resultItem = createResultItemView(index + 1, item)
+                searchResultsContainer.addView(resultItem)
+            }
+            
+            // If POI found, automatically scroll to show items
+            if (matchingLandmark != null) {
+                searchResultsScrollView.post {
+                    searchResultsScrollView.smoothScrollTo(0, 0)
+                }
+            }
+        }
+        
+        if (results.size > 50) {
+            val moreText = TextView(this).apply {
+                text = "... and ${results.size - 50} more result(s)"
+                textSize = 12f
+                setTextColor(Color.parseColor("#757575"))
+                setPadding(16, 8, 16, 8)
+                gravity = Gravity.CENTER
+            }
+            searchResultsContainer.addView(moreText)
+        }
+        
+        if (matchingLandmark != null) {
+            Toast.makeText(this, "📍 ${matchingLandmark.name} - ${results.size} archive items loaded", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "✅ Found ${results.size} result(s) - Tap '🌐 Open' to view archive", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    /**
+     * Create a clickable result item view
+     */
+    private fun createResultItemView(index: Int, item: Route66ArchiveItem): LinearLayout {
+        val itemLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(16, 12, 16, 12)
+            elevation = 2f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = 8
+                bottomMargin = 8
+            }
+        }
+        
+        // Content row (title and info)
+        val contentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        }
+        
+        // Title with Call Number
+        val titleText = TextView(this).apply {
+            text = "📄 Call Number: ${item.callNumber}"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#212121"))
+            setPadding(0, 0, 0, 4)
+        }
+        contentRow.addView(titleText)
+        
+        // CONTENTdm info
+        val contentDmText = TextView(this).apply {
+            text = "   🆔 CONTENTdm Number: ${item.contentDmNumber}"
+            textSize = 12f
+            setTextColor(Color.parseColor("#1976D2"))
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 2, 0, 2)
+        }
+        contentRow.addView(contentDmText)
+        
+        // Item Number
+        val itemNumberText = TextView(this).apply {
+            text = "   🔢 Item Number: ${item.itemNumber}"
+            textSize = 11f
+            setTextColor(Color.parseColor("#757575"))
+            setPadding(0, 2, 0, 4)
+        }
+        contentRow.addView(itemNumberText)
+        
+        // CONTENTdm URL (clickable)
+        val urlText = TextView(this).apply {
+            text = "   🔗 ${item.referenceUrl}"
+            textSize = 10f
+            setTextColor(Color.parseColor("#4CAF50"))
+            setTypeface(null, Typeface.ITALIC)
+            setPadding(0, 2, 0, 4)
+            setOnClickListener {
+                openArchiveItemUrl(item)
+            }
+        }
+        contentRow.addView(urlText)
+        
+        itemLayout.addView(contentRow)
+        
+        // Buttons row
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, 8, 0, 0)
+        }
+        
+        // "View Details" button
+        val viewDetailsButton = Button(this).apply {
+            text = "📋 Details"
+            textSize = 11f
+            setPadding(16, 8, 16, 8)
+            setBackgroundColor(Color.parseColor("#2196F3"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                showArchiveDetailCard(item)
+            }
+        }
+        buttonRow.addView(viewDetailsButton)
+        
+        // "Open Archive" button - directly opens the URL
+        val openButton = Button(this).apply {
+            text = "🌐 Open"
+            textSize = 11f
+            setPadding(16, 8, 16, 8)
+            setBackgroundColor(Color.parseColor("#4CAF50"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                openArchiveItemUrl(item)
+            }
+        }
+        buttonRow.addView(openButton)
+        
+        itemLayout.addView(buttonRow)
+        
+        return itemLayout
+    }
+    
+    /**
+     * Open archive item URL directly
+     */
+    private fun openArchiveItemUrl(item: Route66ArchiveItem) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(item.referenceUrl))
+        try {
+            startActivity(intent)
+            Toast.makeText(this, "Opening archive item...", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Cannot open URL: ${e.message}", Toast.LENGTH_LONG).show()
+            Log.e(TAG, "Error opening URL: ${item.referenceUrl}", e)
+        }
+    }
+    
+    /**
+     * Create archive item detail card
+     */
+    private fun createArchiveDetailCard(rootLayout: FrameLayout) {
+        archiveDetailCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(24, 24, 24, 24)
+            elevation = 16f
+            visibility = View.GONE
+        }
+        
+        // Title
+        archiveDetailTitle = TextView(this).apply {
+            text = "Archive Item Details"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#212121"))
+            setPadding(0, 0, 0, 16)
+        }
+        archiveDetailCard.addView(archiveDetailTitle)
+        
+        // Call Number
+        archiveDetailCallNumber = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#424242"))
+            setPadding(0, 4, 0, 4)
+        }
+        archiveDetailCard.addView(archiveDetailCallNumber)
+        
+        // CONTENTdm Number
+        archiveDetailContentDm = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#424242"))
+            setPadding(0, 4, 0, 4)
+        }
+        archiveDetailCard.addView(archiveDetailContentDm)
+        
+        // Item Number
+        archiveDetailItemNumber = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#424242"))
+            setPadding(0, 4, 0, 4)
+        }
+        archiveDetailCard.addView(archiveDetailItemNumber)
+        
+        // URL
+        archiveDetailUrl = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#2196F3"))
+            setPadding(0, 8, 0, 16)
+            setTypeface(null, Typeface.ITALIC)
+        }
+        archiveDetailCard.addView(archiveDetailUrl)
+        
+        // Buttons row
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        
+        // Open Archive Item button
+        archiveOpenButton = Button(this).apply {
+            text = "🌐 Open Archive Item"
+            setBackgroundColor(Color.parseColor("#4CAF50"))
+            setTextColor(Color.WHITE)
+            setPadding(24, 12, 24, 12)
+            setOnClickListener {
+                openArchiveItem()
+            }
+        }
+        buttonRow.addView(archiveOpenButton)
+        
+        // Close button
+        archiveCloseButton = Button(this).apply {
+            text = "✕ Close"
+            setBackgroundColor(Color.parseColor("#F44336"))
+            setTextColor(Color.WHITE)
+            setPadding(24, 12, 24, 12)
+            setOnClickListener {
+                hideArchiveDetailCard()
+            }
+        }
+        buttonRow.addView(archiveCloseButton)
+        
+        archiveDetailCard.addView(buttonRow)
+        
+        // Add to root layout
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            leftMargin = 16
+            rightMargin = 16
+            bottomMargin = 32
+        }
+        rootLayout.addView(archiveDetailCard, params)
+    }
+    
+    private var currentArchiveItem: Route66ArchiveItem? = null
+    
+    /**
+     * Show archive item detail card
+     */
+    private fun showArchiveDetailCard(item: Route66ArchiveItem) {
+        currentArchiveItem = item
+        
+        archiveDetailTitle.text = "📄 Archive Item Details"
+        archiveDetailCallNumber.text = "📋 Call Number: ${item.callNumber}"
+        archiveDetailContentDm.text = "🆔 CONTENTdm Number: ${item.contentDmNumber}"
+        archiveDetailItemNumber.text = "🔢 Item Number: ${item.itemNumber}"
+        archiveDetailUrl.text = "🔗 ${item.referenceUrl}"
+        
+        archiveDetailCard.visibility = View.VISIBLE
+        
+        // Hide search panel to show detail card better
+        searchPanel.visibility = View.GONE
+        isSearchVisible = false
+    }
+    
+    /**
+     * Hide archive detail card
+     */
+    private fun hideArchiveDetailCard() {
+        archiveDetailCard.visibility = View.GONE
+        currentArchiveItem = null
+    }
+    
+    /**
+     * Open archive item URL in browser
+     */
+    private fun openArchiveItem() {
+        val item = currentArchiveItem
+        if (item != null) {
+            openArchiveItemUrl(item)
+        } else {
+            Toast.makeText(this, "No archive item selected", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    /**
      * Create the Geofence Monitor UI overlay
      */
     private fun createGeofenceMonitorUI(rootLayout: FrameLayout) {
@@ -685,9 +1378,29 @@ class MainActivity : ComponentActivity() {
 
 
     /**
-     * Add markers for all Arizona Route 66 landmarks
+     * Add markers for all Route 66 landmarks (limit to prevent UI freeze)
      */
     private fun addAllLandmarkMarkers() {
+        if (ArizonaLandmarks.landmarks.isEmpty()) {
+            Log.w(TAG, "No landmarks to display")
+            return
+        }
+        
+        // Limit markers to prevent UI freeze with thousands of POIs
+        // Filter to Arizona landmarks first, then limit total
+        val arizonaLandmarks = ArizonaLandmarks.landmarks.filter { landmark ->
+            // Filter to Arizona (latitude 31-37, longitude -115 to -109)
+            landmark.latitude in 31.0..37.0 && landmark.longitude in -115.0..-109.0
+        }
+        
+        val maxMarkers = 200 // Limit to 200 markers to prevent UI freeze
+        val landmarksToShow = if (arizonaLandmarks.size > maxMarkers) {
+            Log.w(TAG, "Too many landmarks (${arizonaLandmarks.size}), showing first $maxMarkers")
+            arizonaLandmarks.take(maxMarkers)
+        } else {
+            arizonaLandmarks
+        }
+        
         // Convert vector drawable to bitmap
         val drawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.red_marker)
         val markerBitmap = if (drawable != null) {
@@ -707,7 +1420,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         
-        ArizonaLandmarks.landmarks.forEach { landmark ->
+        landmarksToShow.forEach { landmark ->
             val markerOptions = PointAnnotationOptions()
                 .withPoint(landmark.toPoint())
                 .withIconImage(markerBitmap)
@@ -721,14 +1434,26 @@ class MainActivity : ComponentActivity() {
             }
         }
         
-        Log.d(TAG, "Added ${ArizonaLandmarks.landmarks.size} landmark markers")
+        Log.d(TAG, "Added ${landmarksToShow.size} landmark markers (out of ${ArizonaLandmarks.landmarks.size} total)")
     }
 
     /**
-     * Draw geofence radius circles around all landmarks
+     * Draw geofence radius circles around all landmarks (limited to prevent UI freeze)
      */
     private fun drawAllGeofenceCircles() {
-        ArizonaLandmarks.landmarks.forEach { landmark ->
+        if (ArizonaLandmarks.landmarks.isEmpty()) return
+        
+        // Limit circles to same landmarks as markers
+        val arizonaLandmarks = ArizonaLandmarks.landmarks.filter { landmark ->
+            landmark.latitude in 31.0..37.0 && landmark.longitude in -115.0..-109.0
+        }
+        val landmarksToShow = if (arizonaLandmarks.size > 200) {
+            arizonaLandmarks.take(200)
+        } else {
+            arizonaLandmarks
+        }
+        
+        landmarksToShow.forEach { landmark ->
             val circleOptions = CircleAnnotationOptions()
                 .withPoint(landmark.toPoint())
                 .withCircleRadius((landmark.radiusMeters / 10).toDouble()) // Visual scaling
@@ -998,7 +1723,18 @@ class MainActivity : ComponentActivity() {
         }
         buttonRow.addView(detailListenButton)
 
-            // Navigate button
+        // "About" button - opens CONTENTdm for this POI
+        detailAboutButton = Button(this).apply {
+            text = "ℹ️ About"
+            setBackgroundColor(Color.parseColor("#9C27B0"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                openAboutForCurrentLandmark()
+            }
+        }
+        buttonRow.addView(detailAboutButton)
+
+        // Navigate button
         val navigateButton = Button(this).apply {
             text = "Navigate"
                 setOnClickListener {
@@ -1076,8 +1812,22 @@ class MainActivity : ComponentActivity() {
         detailCard.visibility = View.VISIBLE
 
         //save where to navigate
-        val lm = ArizonaLandmarks.findById(landmarkId)
+        val lm = route66DatabaseRepository.findLandmarkById(landmarkId)
+            ?: ArizonaLandmarks.findById(landmarkId)
         currentDestinationPoint = lm?.toPoint()
+        
+        // Find and store archive items for this landmark (for About button)
+        if (lm != null) {
+            Thread {
+                val matchedItems = findArchiveItemsForLandmark(lm)
+                runOnUiThread {
+                    currentLandmarkArchiveItems = matchedItems
+                    if (matchedItems.isNotEmpty()) {
+                        Log.d(TAG, "Found ${matchedItems.size} archive items for ${lm.name}")
+                    }
+                }
+            }.start()
+        }
 
         // Auto read when opened (if you want; you can remove this line to only read on button press)
         readTextForLandmark(title, description, extra)
@@ -1134,6 +1884,133 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Open About page (CONTENTdm) for the current landmark
+     * Uses call number from CSV to match CONTENTdm and item number, then opens reference URL
+     */
+    private fun openAboutForCurrentLandmark() {
+        val landmarkId = currentLandmarkId
+        if (landmarkId == null) {
+            Toast.makeText(this, "No landmark selected", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        val landmark = route66DatabaseRepository.findLandmarkById(landmarkId)
+            ?: ArizonaLandmarks.findById(landmarkId)
+        if (landmark == null) {
+            Toast.makeText(this, "Landmark not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        // Use pre-matched archive items if available, otherwise find them
+        if (currentLandmarkArchiveItems.isNotEmpty()) {
+            // Open the first matching archive item's reference URL from CSV
+            val firstItem = currentLandmarkArchiveItems.first()
+            openArchiveItemUrl(firstItem)
+            
+            if (currentLandmarkArchiveItems.size > 1) {
+                Toast.makeText(
+                    this,
+                    "Opening archive item 1 of ${currentLandmarkArchiveItems.size} for ${landmark.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Opening archive for ${landmark.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        } else {
+            // Find archive items that match this POI using call number matching
+            Thread {
+                val archiveItems = findArchiveItemsForLandmark(landmark)
+                
+                runOnUiThread {
+                    if (archiveItems.isEmpty()) {
+                        // Fallback: open CONTENTdm search page
+                        val contentDmBaseUrl = "http://cdm16748.contentdm.oclc.org"
+                        val collectionUrl = "$contentDmBaseUrl/digital/collection/cpa"
+                        val searchQuery = landmark.name.replace(" ", "+").replace("'", "%27")
+                        val searchUrl = "$collectionUrl/search/searchterm/$searchQuery"
+                        
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl))
+                        try {
+                            startActivity(intent)
+                            Toast.makeText(
+                                this,
+                                "Opening CONTENTdm search for ${landmark.name}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this, "Cannot open CONTENTdm: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    } else {
+                        // Store matched items
+                        currentLandmarkArchiveItems = archiveItems
+                        
+                        // Open the first matching archive item's reference URL from CSV
+                        val firstItem = archiveItems.first()
+                        openArchiveItemUrl(firstItem)
+                        
+                        if (archiveItems.size > 1) {
+                            Toast.makeText(
+                                this,
+                                "Opening archive item 1 of ${archiveItems.size} for ${landmark.name}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            Toast.makeText(
+                                this,
+                                "Opening archive for ${landmark.name}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+            }.start()
+        }
+    }
+    
+    /**
+     * Find archive items for a landmark by matching call numbers
+     * Uses Route66DatabaseRepository to match POIs with CONTENTdm archive items
+     */
+    private fun findArchiveItemsForLandmark(landmark: Route66Landmark): List<Route66ArchiveItem> {
+        // Load archive data if needed
+        if (!archiveRepository.isLoaded) {
+            archiveRepository.loadArchiveData()
+        }
+        
+        // Get all archive items
+        val allItems = archiveRepository.getAllItems()
+        
+        // Use repository's matching logic
+        val matchedItems = route66DatabaseRepository.matchArchiveItemsToLandmark(landmark, allItems).toMutableList()
+        
+        // If no matches, try fallback matching
+        if (matchedItems.isEmpty()) {
+            val landmarkNameLower = landmark.name.lowercase()
+            val landmarkIdLower = landmark.id.lowercase()
+            val landmarkWords = landmarkNameLower.split(" ", "-", "_", "'", "Ghost", "Town")
+                .filter { it.length > 3 }
+            
+            allItems.forEach { item ->
+                val callLower = item.callNumber.lowercase()
+                val matches = landmarkWords.any { word ->
+                    callLower.contains(word)
+                } || callLower.contains(landmarkIdLower)
+                
+                if (matches && !matchedItems.contains(item)) {
+                    matchedItems.add(item)
+                }
+            }
+        }
+        
+        Log.d(TAG, "Found ${matchedItems.size} archive items for ${landmark.name}")
+        return matchedItems
+    }
+    
     /**
      * Log geofence events for demo inspection
      */
