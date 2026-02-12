@@ -47,6 +47,12 @@ import java.util.Date
 import java.util.Locale
 import android.net.Uri
 import android.speech.tts.TextToSpeech
+import com.mapbox.maps.extension.style.layers.generated.lineLayer
+import com.mapbox.maps.extension.style.sources.generated.geoJsonSource
+import com.mapbox.maps.extension.style.style
+import com.mapbox.maps.extension.style.sources.addSource
+import com.mapbox.maps.extension.style.layers.addLayer
+
 
 /**
  * Main activity for Route 66 Experience app
@@ -243,14 +249,32 @@ class MainActivity : ComponentActivity() {
                 .build()
         )
 
-        // Load Mapbox style and initialize features
-        mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) {
+        mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) { style ->
+
             setupAnnotationManagers()
-            // Landmarks will be loaded from CSV in background thread
-            // Markers will be added after database loads (see loadRoute66Database)
+
+            // ===== ROUTE 66 LINE =====
+
+            val routeSource = geoJsonSource("route66-source") {
+                url("asset://route66.geojson")
+            }
+
+            style.addSource(routeSource)
+
+            val routeLayer = lineLayer("route66-layer", "route66-source") {
+                lineColor("#FFC107")      // amber highlight
+                lineWidth(6.0)
+                lineOpacity(0.9)
+            }
+
+            style.addLayer(routeLayer)
+
+            // ==========================
+
             requestLocationPermissions()
         }
-        
+
+
         // Register broadcast receiver
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
