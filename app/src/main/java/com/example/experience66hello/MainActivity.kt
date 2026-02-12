@@ -47,6 +47,7 @@ import java.util.Date
 import java.util.Locale
 import android.net.Uri
 import android.speech.tts.TextToSpeech
+import android.app.AlertDialog
 
 /**
  * Main activity for Route 66 Experience app
@@ -138,6 +139,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var archiveOpenButton: Button
     private lateinit var archiveCloseButton: Button
 
+    private var activeErrorDialog: AlertDialog? = null
+
     data class GeofenceEvent(
         val landmarkId: String,
         val landmarkName: String,
@@ -151,7 +154,10 @@ class MainActivity : ComponentActivity() {
             if (granted) {
                 checkBackgroundLocationPermission()
             } else {
-                Toast.makeText(this, "Location permission denied", Toast.LENGTH_LONG).show()
+                showBlockingError(
+                    title = "Location Permission Required",
+                    message = "Location permission was denied. The map can still load, but your location and nearby features may not work.\n\nYou can enable it in Settings."
+                )
             }
         }
     
@@ -161,11 +167,10 @@ class MainActivity : ComponentActivity() {
             if (granted) {
                 initializeGeofencing()
             } else {
-                Toast.makeText(
-                    this,
-                    "Background location needed for geofence detection",
-                    Toast.LENGTH_LONG
-                ).show()
+                showBlockingError(
+                    title = "Background Location Required",
+                    message = "Background location is needed for geofence detection.\n\nYou can still use the app, but geofences will not work reliably unless you enable it in Settings."
+                )
                 // Still enable location but geofencing won't work in background
                 enableUserLocation()
             }
@@ -234,6 +239,8 @@ class MainActivity : ComponentActivity() {
         createLandmarkDetailCard(rootLayout)
 
         setContentView(rootLayout)
+
+        showBlockingError(title = "Test Error", message = "If you see this, dialogs work.")
 
         // Set camera to show Arizona Route 66 corridor
         mapView.mapboxMap.setCamera(
@@ -349,13 +356,11 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading Route 66 Database: ${e.message}", e)
                 e.printStackTrace()
-                runOnUiThread {
-                    Toast.makeText(
-                        this,
-                        "Error loading database: ${e.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+
+                showBlockingError(
+                    title = "Route 66 Data Error",
+                    message = "There was a problem loading the Route 66 database.\n\n${e.message ?: "Unknown error"}"
+                )
             }
         }.start()
     }
@@ -554,7 +559,27 @@ class MainActivity : ComponentActivity() {
             completeOfflineDownload(false, "Failed to cache metadata")
         }
     }
-    
+
+    private fun showBlockingError(title: String = "Error", message: String) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+
+            // If another error dialog is already showing, replace it.
+            try {
+                activeErrorDialog?.dismiss()
+            } catch (_: Exception) { }
+
+            activeErrorDialog = AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
+                .setCancelable(false) // cannot dismiss by back/outside
+                .create()
+
+            activeErrorDialog?.show()
+        }
+    }
+
     /**
      * C1: Complete offline download process
      */
@@ -567,7 +592,10 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "✅ $message", Toast.LENGTH_LONG).show()
             Log.d(TAG, "Offline cache complete: $message")
         } else {
-            Toast.makeText(this, "❌ $message", Toast.LENGTH_LONG).show()
+            showBlockingError(
+                title = "Offline Download Failed",
+                message = message
+            )
             Log.e(TAG, "Offline cache failed: $message")
         }
     }
@@ -1009,7 +1037,10 @@ class MainActivity : ComponentActivity() {
             startActivity(intent)
             Toast.makeText(this, "Opening archive item...", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Toast.makeText(this, "Cannot open URL: ${e.message}", Toast.LENGTH_LONG).show()
+            showBlockingError(
+                title = "Unable to Open Link",
+                message = "That archive link could not be opened.\n\n${e.message ?: "Unknown error"}"
+            )
             Log.e(TAG, "Error opening URL: ${item.referenceUrl}", e)
         }
     }
@@ -1350,30 +1381,27 @@ class MainActivity : ComponentActivity() {
     private fun setupAnnotationManagers() {
         val annotationPlugin = mapView.annotations
 
-        // Point markers (Route 66 landmarks)
-        pointAnnotationManager = annotationPlugin.createPointAnnotationManager().apply {
-            // When the user taps a marker, start navigation to that point
-            addClickListener { annotation ->
-                val landmark = landmarkByAnnotationId[annotation.id]
-                if (landmark != null) {
-                    // Optional: move camera closer
-                    mapView.mapboxMap.setCamera(
-                        CameraOptions.Builder()
-                            .center(annotation.point)
-                            .zoom(12.0)
-                            .build()
-                    )
-                    showLandmarkCard(landmark.id)
+        if (pointAnnotationManager == null) {
+            pointAnnotationManager = annotationPlugin.createPointAnnotationManager().apply {
+                addClickListener { annotation ->
+                    val landmark = landmarkByAnnotationId[annotation.id]
+                    if (landmark != null) {
+                        mapView.mapboxMap.setCamera(
+                            CameraOptions.Builder()
+                                .center(annotation.point)
+                                .zoom(12.0)
+                                .build()
+                        )
+                        showLandmarkCard(landmark.id)
+                    }
+                    true
                 }
-                true
-
-            //    startNavigationTo(annotation.point)
-            //    true // tell Mapbox we handled the click
             }
         }
 
-        // Geofence circles
-        circleAnnotationManager = annotationPlugin.createCircleAnnotationManager()
+        if (circleAnnotationManager == null) {
+            circleAnnotationManager = annotationPlugin.createCircleAnnotationManager()
+        }
     }
 
 
@@ -2059,15 +2087,35 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
 
-        unregisterReceiver(geofenceReceiver)
-        connectivityManager.unregisterNetworkCallback(networkCallback)
-        geofenceManager.removeAllGeofences()
+        // Receiver cleanup (safe)
+        try {
+            unregisterReceiver(geofenceReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "geofenceReceiver was not registered or already unregistered", e)
+        }
 
-        //TTS cleanup
+        // Network callback cleanup (safe)
+        if (::connectivityManager.isInitialized && ::networkCallback.isInitialized) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback)
+            } catch (e: Exception) {
+                Log.w(TAG, "Network callback not registered or already unregistered", e)
+            }
+        }
+
+        // Geofence cleanup (safe)
+        try {
+            geofenceManager.removeAllGeofences()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error removing geofences during cleanup", e)
+        }
+
+        // TTS cleanup
         tts?.stop()
         tts?.shutdown()
         tts = null
 
         if (::mapView.isInitialized) mapView.onDestroy()
     }
+
 }
