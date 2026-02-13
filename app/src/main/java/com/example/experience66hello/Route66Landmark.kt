@@ -11,8 +11,9 @@ data class Route66Landmark(
     val description: String,
     val latitude: Double,
     val longitude: Double,
-    val radiusMeters: Float = 600f  // Geofence radius in meters
-) {
+    val radiusMeters: Float = 600f,  // Geofence radius in meters
+    val narrative: String? = null
+    ) {
     /**
      * Converts the landmark's coordinates to a Mapbox Point
      */
