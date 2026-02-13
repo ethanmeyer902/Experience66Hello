@@ -66,7 +66,11 @@ class GeofenceManager(private val context: Context) {
         val geofenceList = landmarksToRegister.map { landmark ->
             createGeofence(landmark)
         }
-        
+        if (geofenceList.isEmpty()) {
+            Log.e(TAG, "No landmarks available -> not registering geofences yet.")
+            onFailure(IllegalStateException("No landmarks loaded. Geofences not registered."))
+            return
+        }
         val geofencingRequest = GeofencingRequest.Builder()
             .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
             .addGeofences(geofenceList)
