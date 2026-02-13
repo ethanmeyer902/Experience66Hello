@@ -275,7 +275,7 @@ class MainActivity : ComponentActivity() {
         )
 
         mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) { style ->
-
+            isStyleLoaded = true
             setupAnnotationManagers()
 
             // ===== ROUTE 66 LINE =====
@@ -295,11 +295,6 @@ class MainActivity : ComponentActivity() {
             style.addLayer(routeLayer)
 
             // ==========================
-
-        // Load Mapbox style and initialize features
-        mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) {
-            isStyleLoaded = true
-            setupAnnotationManagers()
 
             if (pendingMarkers) {
                 pendingMarkers = false
@@ -2350,4 +2345,5 @@ class MainActivity : ComponentActivity() {
 
         if (::mapView.isInitialized) mapView.onDestroy()
     }
-}
+  }
+
