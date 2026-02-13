@@ -43,10 +43,10 @@ data class Route66DatabaseEntry(
         return Route66Landmark(
             id = id,
             name = name,
-            description = description ?: name,
+            description = description,
             latitude = latitude,
             longitude = longitude,
-            radiusMeters = 600f // Default radius as specified
+            radiusMeters = 600f, // Default radius as specified
         )
     }
     

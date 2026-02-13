@@ -57,14 +57,18 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val TAG = "MainActivity"
     }
-
+    private var topUpdateButton: Button? = null
     private lateinit var mapView: MapView
     private lateinit var geofenceManager: GeofenceManager
     private lateinit var offlineMapManager: OfflineMapManager
     private lateinit var offlineDataCache: OfflineDataCache
     private lateinit var archiveRepository: ArchiveRepository
     private lateinit var route66DatabaseRepository: Route66DatabaseRepository
-    
+    //
+    private var pendingGeofenceInit = false
+    private var isStyleLoaded = false
+    private var pendingMarkers = false
+
     private var pointAnnotationManager: PointAnnotationManager? = null
     private var circleAnnotationManager: CircleAnnotationManager? = null
     
@@ -78,14 +82,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var monitorPanel: LinearLayout
     private lateinit var geofenceListTextView: TextView
     private lateinit var eventLogTextView: TextView
-    private lateinit var toggleButton: Button
     private var isMonitorVisible = false
     
     // UI components for offline status bar
     private lateinit var offlineStatusBar: LinearLayout
     private lateinit var offlineStatusText: TextView
     private lateinit var offlineStatusIcon: TextView
-    private lateinit var downloadButton: Button
     private lateinit var downloadProgress: ProgressBar
     private var isOnline = true
     
@@ -111,7 +113,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var detailTitleText: TextView
     private lateinit var detailDescriptionText: TextView
     private lateinit var detailExtraText: TextView
-    private lateinit var detailCloseButton: Button
     private lateinit var detailListenButton: Button
     private lateinit var detailAboutButton: Button
 
@@ -120,8 +121,6 @@ class MainActivity : ComponentActivity() {
     
     // Search UI Components
     private lateinit var searchBar: EditText
-    private lateinit var searchButton: Button
-    private lateinit var searchResultsPanel: LinearLayout
     private lateinit var searchResultsScrollView: ScrollView
     private lateinit var searchResultsContainer: LinearLayout
     private lateinit var searchPanel: LinearLayout
@@ -170,6 +169,14 @@ class MainActivity : ComponentActivity() {
                 enableUserLocation()
             }
         }
+    //POI List
+    private val poiListLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                val id = result.data?.getStringExtra("landmark_id") ?: return@registerForActivityResult
+                showLandmarkCard(id)
+            }
+        }
 
     // Receiver for geofence events
     private val geofenceReceiver = object : BroadcastReceiver() {
@@ -182,6 +189,17 @@ class MainActivity : ComponentActivity() {
             handleGeofenceEvent(landmarkId, landmarkName, transitionType, timestamp)
         }
     }
+
+    //onboarding
+    private lateinit var onboardingOverlay: FrameLayout
+    private val prefs by lazy { getSharedPreferences("experience66_prefs", MODE_PRIVATE) }
+    private fun hasSeenOnboarding(): Boolean =
+        prefs.getBoolean("seen_onboarding", false)
+    private fun setSeenOnboarding() {
+        prefs.edit().putBoolean("seen_onboarding", true).apply()
+    }
+
+    private fun Int.dp(): Int = (this * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -223,17 +241,24 @@ class MainActivity : ComponentActivity() {
         
         // C1: Create offline status bar at top
         createOfflineStatusBar(rootLayout)
-        
-        // Create search UI
-        createSearchUI(rootLayout)
-        
+
         // Create and add Geofence Monitor UI
         createGeofenceMonitorUI(rootLayout)
 
+        // Create and add Search UI
+        createTopSearchAndButtons(rootLayout)
+        createSearchResultsPanel(rootLayout)
         // Create and add POI detail card
         createLandmarkDetailCard(rootLayout)
 
+        createArchiveDetailCard(rootLayout)
+
         setContentView(rootLayout)
+        //onboarding
+        if (!hasSeenOnboarding()) {
+            createOnboardingOverlay(rootLayout)
+            showOnboarding()
+        }
 
         // Set camera to show Arizona Route 66 corridor
         mapView.mapboxMap.setCamera(
@@ -245,9 +270,17 @@ class MainActivity : ComponentActivity() {
 
         // Load Mapbox style and initialize features
         mapView.mapboxMap.loadStyle(Style.MAPBOX_STREETS) {
+            isStyleLoaded = true
             setupAnnotationManagers()
-            // Landmarks will be loaded from CSV in background thread
-            // Markers will be added after database loads (see loadRoute66Database)
+
+            if (pendingMarkers) {
+                pendingMarkers = false
+                addAllLandmarkMarkers()
+                drawAllGeofenceCircles()
+                updateGeofenceListDisplay()
+                tryRegisterGeofencesIfReady()
+            }
+
             requestLocationPermissions()
         }
         
@@ -275,7 +308,161 @@ class MainActivity : ComponentActivity() {
             Log.d(TAG, "Archive data preloaded")
         }.start()
     }
-    
+    /**
+     * New user onboarding overlay
+     */
+    private fun createOnboardingOverlay(rootLayout: FrameLayout) {
+        onboardingOverlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#CC000000")) // translucent black
+            visibility = View.GONE
+            isClickable = true // blocks touches to map underneath
+            isFocusable = true
+        }
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(24.dp(), 24.dp(), 24.dp(), 24.dp())
+            elevation = 20f
+        }
+
+        val title = TextView(this).apply {
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#212121"))
+            text = "Welcome to Experience66"
+        }
+
+        val body = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#424242"))
+            setLineSpacing(6f, 1.05f)
+            setPadding(0, 12.dp(), 0, 0)
+        }
+
+        // Progress dots
+        val dotsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 16.dp(), 0, 0)
+        }
+
+        fun dot(isActive: Boolean): View {
+            return View(this).apply {
+                val size = 8.dp()
+                layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                    marginStart = 6.dp()
+                    marginEnd = 6.dp()
+                }
+                background = androidx.core.content.ContextCompat.getDrawable(
+                    this@MainActivity,
+                    android.R.drawable.presence_online
+                )
+                // presence_online is a circle-ish; we just tint it
+                backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    Color.parseColor(if (isActive) "#1976D2" else "#BDBDBD")
+                )
+            }
+        }
+
+        val d1 = dot(true)
+        val d2 = dot(false)
+        val d3 = dot(false)
+        val d4 = dot(false)
+        dotsRow.addView(d1); dotsRow.addView(d2); dotsRow.addView(d3); dotsRow.addView(d4)
+
+        // Buttons
+        val buttonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, 18.dp(), 0, 0)
+        }
+
+        val skipBtn = Button(this).apply {
+            text = "Skip"
+            setOnClickListener { finishOnboarding() }
+        }
+
+        val nextBtn = Button(this).apply {
+            text = "Next"
+        }
+
+        fun setDots(step: Int) {
+            fun tintDot(v: View, active: Boolean) {
+                v.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    Color.parseColor(if (active) "#1976D2" else "#BDBDBD")
+                )
+            }
+            tintDot(d1, step == 0)
+            tintDot(d2, step == 1)
+            tintDot(d3, step == 2)
+            tintDot(d4, step == 3)
+        }
+
+        val pages = listOf(
+            "Explore historic Route 66 landmarks across Arizona.\n\nTap markers on the map to discover stories, photos, and archive materials.",
+            "Use the search bar to find a POI or archive item.\n\nTap any marker on the map to open its detail card. \n\nOr use the POIs button to see a list.",
+            "Tap MONITOR to see active geofences and entry/exit events.\n\n Tap UPDATE to cache landmarks and map data for offline use.\n\nWhen offline, the app will use cached data automatically.",
+            "The ABOUT button inside a POI card will take you straight to the archive.\n\nTap NAVIGATE inside a POI card to get directions.\n\nTap LISTEN to hear the landmark description."
+        )
+
+        var step = 0
+        body.text = pages[step]
+        setDots(step)
+
+        fun updateStepUI() {
+            body.text = pages[step]
+            setDots(step)
+            nextBtn.text = if (step == pages.lastIndex) "Get Started" else "Next"
+        }
+
+        nextBtn.setOnClickListener {
+            if (step < pages.lastIndex) {
+                step++
+                updateStepUI()
+            } else {
+                finishOnboarding()
+            }
+        }
+
+        buttonsRow.addView(skipBtn)
+        buttonsRow.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(12.dp(), 1) })
+        buttonsRow.addView(nextBtn)
+
+        card.addView(title)
+        card.addView(body)
+        card.addView(dotsRow)
+        card.addView(buttonsRow)
+
+        val cardParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.CENTER
+            leftMargin = 20.dp()
+            rightMargin = 20.dp()
+        }
+
+        onboardingOverlay.addView(card, cardParams)
+
+        rootLayout.addView(
+            onboardingOverlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun showOnboarding() {
+        onboardingOverlay.visibility = View.VISIBLE
+    }
+
+    private fun finishOnboarding() {
+        setSeenOnboarding()
+        onboardingOverlay.visibility = View.GONE
+    }
+
     /**
      * Load Route 66 Database from CSV and initialize landmarks
      */
@@ -310,7 +497,45 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     // Initialize ArizonaLandmarks with loaded data
                     ArizonaLandmarks.initialize(landmarks)
-                    
+
+                    if (isStyleLoaded) {
+                        // safe to draw now
+                        pointAnnotationManager?.deleteAll()
+                        circleAnnotationManager?.deleteAll()
+                        landmarkByAnnotationId.clear()
+
+                        addAllLandmarkMarkers()
+                        drawAllGeofenceCircles()
+                        updateGeofenceListDisplay()
+                        tryRegisterGeofencesIfReady()
+                    } else {
+                        // style not ready yet; draw later
+                        pendingMarkers = true
+                    }
+
+                    if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        tryRegisterGeofencesIfReady()
+                    }
+
+                    // If permissions were granted earlier, finish geofence setup now
+                    val hasFine = ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+
+                    val hasBg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ActivityCompat.checkSelfPermission(
+                            this,
+                            Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                        ) == PackageManager.PERMISSION_GRANTED
+                    } else true
+
+                    if (pendingGeofenceInit && hasFine && hasBg) {
+                        pendingGeofenceInit = false
+                        initializeGeofencing()
+                    }
                     Log.d(TAG, "Loaded ${landmarks.size} landmarks from Route 66 Database")
                     
                     Toast.makeText(
@@ -318,33 +543,7 @@ class MainActivity : ComponentActivity() {
                         "Loaded ${landmarks.size} POIs",
                         Toast.LENGTH_SHORT
                     ).show()
-                    
-                    // Update map markers and geofences if map is already loaded
-                    if (::mapView.isInitialized) {
-                        mapView.mapboxMap.getStyle { style ->
-                            // Clear existing markers and circles
-                            pointAnnotationManager?.deleteAll()
-                            circleAnnotationManager?.deleteAll()
-                            landmarkByAnnotationId.clear()
-                            
-                            // Add new markers and circles (limited to prevent freeze)
-                            setupAnnotationManagers()
-                            addAllLandmarkMarkers()
-                            drawAllGeofenceCircles()
-                            
-                            // Update geofence monitor display
-                            updateGeofenceListDisplay()
-                            
-                            // Re-register geofences with new landmarks (limited to 100)
-                            if (ActivityCompat.checkSelfPermission(
-                                    this,
-                                    Manifest.permission.ACCESS_FINE_LOCATION
-                                ) == PackageManager.PERMISSION_GRANTED
-                            ) {
-                                initializeGeofencing()
-                            }
-                        }
-                    }
+
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading Route 66 Database: ${e.message}", e)
@@ -450,18 +649,7 @@ class MainActivity : ComponentActivity() {
             max = 100
         }
         offlineStatusBar.addView(downloadProgress)
-        
-        // Download button
-        downloadButton = Button(this).apply {
-            text = "📥 Cache"
-            setBackgroundColor(Color.parseColor("#1976D2"))
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            setPadding(16, 8, 16, 8)
-            setOnClickListener { handleOfflineDownload() }
-        }
-        offlineStatusBar.addView(downloadButton)
-        
+
         val params = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
@@ -488,8 +676,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 "Online | No cache"
             }
-            downloadButton.text = if (cacheInfo.isValid) "🔄 Update" else "📥 Cache"
-            downloadButton.isEnabled = true
         } else {
             offlineStatusBar.setBackgroundColor(Color.parseColor("#FF9800"))
             offlineStatusIcon.text = "📴"
@@ -498,9 +684,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 "Offline | No cache available!"
             }
-            downloadButton.text = "Offline"
-            downloadButton.isEnabled = false
-            
+
             if (!cacheInfo.isValid) {
                 offlineStatusBar.setBackgroundColor(Color.parseColor("#F44336"))
             }
@@ -514,11 +698,14 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Starting offline cache...", Toast.LENGTH_SHORT).show()
         
         // Show progress
-        downloadProgress.visibility = View.VISIBLE
-        downloadProgress.progress = 0
-        downloadButton.isEnabled = false
-        downloadButton.text = "⏳"
-        
+        if (::downloadProgress.isInitialized) {
+            downloadProgress.visibility = View.VISIBLE
+            downloadProgress.progress = 0
+        }
+        // Disable BOTH buttons if they exist
+        topUpdateButton?.isEnabled = false
+        topUpdateButton?.text = "⏳"
+
         // Cache landmark metadata first
         val metadataCached = offlineDataCache.cacheLandmarksData()
         
@@ -559,8 +746,12 @@ class MainActivity : ComponentActivity() {
      * C1: Complete offline download process
      */
     private fun completeOfflineDownload(success: Boolean, message: String) {
-        downloadProgress.visibility = View.GONE
-        downloadButton.isEnabled = true
+        if (::downloadProgress.isInitialized) downloadProgress.visibility = View.GONE
+
+        // Re-enable BOTH buttons
+        topUpdateButton?.isEnabled = true
+        topUpdateButton?.text = "UPDATE"
+
         updateOfflineStatusUI()
         
         if (success) {
@@ -587,141 +778,179 @@ class MainActivity : ComponentActivity() {
             Log.d(TAG, "Offline cache loaded: ${cacheInfo.itemCount} items, last updated: ${cacheInfo.lastUpdated}")
         }
     }
-    
-    /**
-     * Create search UI for POI/archive search
-     */
-    private fun createSearchUI(rootLayout: FrameLayout) {
-        // Search panel container
-        searchPanel = LinearLayout(this).apply {
+    private fun createTopSearchAndButtons(rootLayout: FrameLayout) {
+        // A vertical container pinned to the top (UNDER the offlineStatusBar)
+        val topContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(16, 12, 16, 12)
-            elevation = 8f
-            visibility = View.GONE // Initially hidden
+            setPadding(12.dp(), 10.dp(), 12.dp(), 10.dp())
+            setBackgroundColor(Color.TRANSPARENT)
+            elevation = 12f
         }
-        
-        // Search bar row
+
+        // --- Buttons row (ON TOP now) ---
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, 0, 0, 10.dp())
+        }
+
+        fun addGap() {
+            buttonRow.addView(View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(10.dp(), 1)
+            })
+        }
+
+        // UPDATE (reuse your cache/update action)
+        val updateBtn = Button(this).apply {
+            text = "UPDATE"
+            textSize = 11f
+            setBackgroundColor(Color.parseColor("#1976D2"))
+            setTextColor(Color.WHITE)
+            setPadding(14.dp(), 10.dp(), 14.dp(), 10.dp())
+            setOnClickListener { handleOfflineDownload() }
+        }
+        topUpdateButton = updateBtn
+
+        // MONITOR (reuse your toggle)
+        val monitorBtn = Button(this).apply {
+            text = "MONITOR"
+            textSize = 11f
+            setBackgroundColor(Color.parseColor("#2196F3"))
+            setTextColor(Color.WHITE)
+            setPadding(14.dp(), 10.dp(), 14.dp(), 10.dp())
+            setOnClickListener { toggleMonitorPanel() }
+        }
+
+        // POIs
+        val poisBtn = Button(this).apply {
+            text = "POIs"
+            textSize = 11f
+            setBackgroundColor(Color.parseColor("#424242"))
+            setTextColor(Color.WHITE)
+            setPadding(14.dp(), 10.dp(), 14.dp(), 10.dp())
+            setOnClickListener {
+                poiListLauncher.launch(Intent(this@MainActivity, PoiListActivity::class.java))
+            }
+        }
+
+        buttonRow.addView(updateBtn); addGap()
+        buttonRow.addView(monitorBtn); addGap()
+        buttonRow.addView(poisBtn)
+
+        topContainer.addView(buttonRow)
+
+        // --- Search row (UNDER buttons now) ---
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        
-        // Search input field
+
         searchBar = EditText(this).apply {
             hint = "Search POI or Call Number..."
             textSize = 14f
-            setPadding(16, 12, 16, 12)
-            setBackgroundColor(Color.parseColor("#F5F5F5"))
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
-                marginEnd = 8
+            setPadding(14.dp(), 12.dp(), 14.dp(), 12.dp())
+            setBackgroundColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = 10.dp()
             }
+            setSingleLine(true)
             setOnEditorActionListener { _, _, _ ->
                 performSearch()
                 true
             }
         }
-        searchRow.addView(searchBar)
-        
-        // Search button
-        searchButton = Button(this).apply {
-            text = "🔍"
-            setBackgroundColor(Color.parseColor("#2196F3"))
-            setTextColor(Color.WHITE)
-            setPadding(16, 12, 16, 12)
-            textSize = 14f
+
+        val searchIconBtn = android.widget.ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_search)
+            setBackgroundColor(Color.parseColor("#FF9800"))
+            setColorFilter(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(44.dp(), 44.dp())
             setOnClickListener { performSearch() }
         }
-        searchRow.addView(searchButton)
-        
-        // Close button
-        val closeButton = Button(this).apply {
-            text = "✕"
-            setBackgroundColor(Color.parseColor("#F44336"))
-            setTextColor(Color.WHITE)
-            setPadding(16, 12, 16, 12)
-            textSize = 14f
-            setOnClickListener { toggleSearchPanel() }
-        }
-        searchRow.addView(closeButton)
-        
-        searchPanel.addView(searchRow)
-        
-        // Results scroll view with container for clickable items
-        searchResultsScrollView = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                500  // Increased height to show more archive items
-            ).apply {
-                topMargin = 12
-            }
-        }
-        
-        searchResultsContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(12, 12, 12, 12)
-            setBackgroundColor(Color.parseColor("#FAFAFA"))
-        }
-        searchResultsScrollView.addView(searchResultsContainer)
-        searchPanel.addView(searchResultsScrollView)
-        
-        // Add search panel to root layout
-        val searchParams = FrameLayout.LayoutParams(
+
+        searchRow.addView(searchBar)
+        searchRow.addView(searchIconBtn)
+        topContainer.addView(searchRow)
+
+        // Add container to rootLayout pinned to TOP
+        val params = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.TOP
-            topMargin = 60 // Below status bar
-            leftMargin = 16
-            rightMargin = 16
+            leftMargin = 8.dp()
+            rightMargin = 8.dp()
+            topMargin = 0
         }
-        rootLayout.addView(searchPanel, searchParams)
-        
-        // Create archive item detail card
-        createArchiveDetailCard(rootLayout)
-        
-        // Add search toggle button (positioned to left of monitor button)
-        val searchToggleButton = Button(this).apply {
-            text = "🔍 Search"
-            setBackgroundColor(Color.parseColor("#FF9800"))
-            setTextColor(Color.WHITE)
-            setPadding(24, 16, 24, 16)
-            textSize = 11f
-            setOnClickListener { toggleSearchPanel() }
+
+        rootLayout.addView(topContainer, params)
+
+        // After offlineStatusBar is measured, move this container below it
+        rootLayout.post {
+            params.topMargin = offlineStatusBar.height
+            topContainer.layoutParams = params
         }
-        
-        val searchToggleParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
+    }
+
+    private fun createSearchResultsPanel(rootLayout: FrameLayout) {
+        // Panel that holds the results (hidden until you search)
+        searchPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            setPadding(12.dp(), 12.dp(), 12.dp(), 12.dp())
+            elevation = 14f
+            visibility = View.GONE
+        }
+
+        // Scroll area
+        searchResultsScrollView = ScrollView(this).apply {
+            isFillViewport = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        // Container inside scroll
+        searchResultsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        searchResultsScrollView.addView(searchResultsContainer)
+        searchPanel.addView(searchResultsScrollView)
+
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            topMargin = 100
-            rightMargin = 140 // Position to left of monitor button (which is at rightMargin 16)
+            gravity = Gravity.TOP
+            leftMargin = 8.dp()
+            rightMargin = 8.dp()
+            // push below the offline bar + your top search/buttons container (we set after layout)
+            topMargin = 0
         }
-        rootLayout.addView(searchToggleButton, searchToggleParams)
-    }
-    
-    /**
-     * Toggle search panel visibility
-     */
-    private fun toggleSearchPanel() {
-        isSearchVisible = !isSearchVisible
-        searchPanel.visibility = if (isSearchVisible) View.VISIBLE else View.GONE
-        if (!isSearchVisible) {
-            searchBar.setText("")
-            searchResultsContainer.removeAllViews()
-            hideArchiveDetailCard()
+
+        rootLayout.addView(searchPanel, params)
+
+        // Move panel below the offlineStatusBar + top container height
+        rootLayout.post {
+            val topOffset = offlineStatusBar.height
+            params.topMargin = topOffset + 110.dp() // simple safe offset; adjust if needed
+            searchPanel.layoutParams = params
         }
     }
-    
+
     /**
      * Perform search for POI or call number
      */
     private fun performSearch() {
+        searchPanel.visibility = View.VISIBLE
+        isSearchVisible = true
+
         val query = searchBar.text.toString().trim()
         
         if (query.isBlank()) {
@@ -1159,25 +1388,6 @@ class MainActivity : ComponentActivity() {
      * Create the Geofence Monitor UI overlay
      */
     private fun createGeofenceMonitorUI(rootLayout: FrameLayout) {
-        // Toggle button at top right (adjusted for status bar)
-        toggleButton = Button(this).apply {
-            text = "📍 Monitor"
-            setBackgroundColor(Color.parseColor("#2196F3"))
-            setTextColor(Color.WHITE)
-            setPadding(24, 16, 24, 16)
-            textSize = 11f
-            setOnClickListener { toggleMonitorPanel() }
-        }
-        
-        val toggleParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            topMargin = 100 // Below status bar
-            rightMargin = 16
-        }
-        rootLayout.addView(toggleButton, toggleParams)
         
         // Monitor panel (initially hidden)
         monitorPanel = LinearLayout(this).apply {
@@ -1289,12 +1499,8 @@ class MainActivity : ComponentActivity() {
         isMonitorVisible = !isMonitorVisible
         if (isMonitorVisible) {
             monitorPanel.visibility = View.VISIBLE
-            toggleButton.text = "✕ Hide"
-            toggleButton.setBackgroundColor(Color.parseColor("#F44336"))
         } else {
             monitorPanel.visibility = View.GONE
-            toggleButton.text = "📍 Monitor"
-            toggleButton.setBackgroundColor(Color.parseColor("#2196F3"))
         }
     }
     
@@ -1482,37 +1688,44 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    
+
     private fun checkBackgroundLocationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            when {
-                ActivityCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED -> {
-                    initializeGeofencing()
-                }
-                else -> {
-                    // Show rationale first
-                    Toast.makeText(
-                        this,
-                        "Background location allows geofence detection while traveling",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    requestBackgroundLocationLauncher.launch(
-                        Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                    )
-                }
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                == PackageManager.PERMISSION_GRANTED
+            ) {
+                enableUserLocation()
+                // DON'T call initializeGeofencing() here
+                // Wait until landmarks are loaded
+                tryRegisterGeofencesIfReady()
+            } else {
+                Toast.makeText(this, "Background location allows geofence detection while traveling", Toast.LENGTH_LONG).show()
+                requestBackgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
             }
         } else {
-            initializeGeofencing()
+            enableUserLocation()
+            tryRegisterGeofencesIfReady()
         }
     }
-    
+
+    private fun tryRegisterGeofencesIfReady() {
+        if (ArizonaLandmarks.landmarks.isNotEmpty()) {
+            initializeGeofencing()
+        } else {
+            Log.d(TAG, "Landmarks not loaded yet; will register geofences after DB load.")
+        }
+    }
     /**
      * Initialize geofencing after permissions granted
      */
     private fun initializeGeofencing() {
+        // Prevent crash: no geofences to register yet
+        if (ArizonaLandmarks.landmarks.isEmpty()) {
+            Log.w(TAG, "initializeGeofencing(): landmarks not loaded yet. Will retry after DB load.")
+            pendingGeofenceInit = true
+            return
+        }
+
         enableUserLocation()
         
         geofenceManager.registerAllGeofences(
@@ -1678,40 +1891,75 @@ class MainActivity : ComponentActivity() {
     private fun createLandmarkDetailCard(rootLayout: FrameLayout) {
         detailCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(24, 24, 24, 24)
-            elevation = 12f
-            visibility = View.GONE // hidden until we show a landmark
+            background = androidx.core.content.ContextCompat.getDrawable(this@MainActivity, R.drawable.poi_card_bg)
+            elevation = 18f
+            clipToPadding = false
+            visibility = View.GONE
+        }
+        //header/Title
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#FF7A00"))
+            setPadding(18, 14, 18, 14)
+            gravity = Gravity.CENTER_VERTICAL
         }
 
-        // Title
         detailTitleText = TextView(this).apply {
-            textSize = 18f
+            textSize = 20f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#212121"))
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        detailCard.addView(detailTitleText)
+
+        val closeX = TextView(this).apply {
+            text = "✕"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            setPadding(16, 0, 0, 0)
+            setOnClickListener { hideLandmarkCard() }
+        }
+
+        headerRow.addView(detailTitleText)
+        headerRow.addView(closeX)
+
+        detailCard.addView(headerRow)
+
+        detailCard.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 12
+            )
+        })
 
         // Description
         detailDescriptionText = TextView(this).apply {
-            textSize = 14f
-            setTextColor(Color.parseColor("#424242"))
-            setPadding(0, 8, 0, 8)
+            textSize = 14.5f
+            setTextColor(Color.parseColor("#333333"))
+            setLineSpacing(6f, 1.05f)
+            setPadding(4, 6, 4, 6)
         }
         detailCard.addView(detailDescriptionText)
 
         // Extra / historical notes
         detailExtraText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#616161"))
-            setPadding(0, 4, 0, 12)
+            textSize = 12.5f
+            setTextColor(Color.parseColor("#666666"))
+            setPadding(4, 0, 4, 10)
         }
+
         detailCard.addView(detailExtraText)
 
         // Buttons row
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
+        }
+
+        fun styleButton(b: Button, color: String) {
+            b.background = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.btn_pill)
+            b.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(color))
+            b.setTextColor(Color.WHITE)
+            b.textSize = 12f
+            b.isAllCaps = false
         }
 
         // "Listen" button
@@ -1721,7 +1969,6 @@ class MainActivity : ComponentActivity() {
                 readCurrentLandmark()
             }
         }
-        buttonRow.addView(detailListenButton)
 
         // "About" button - opens CONTENTdm for this POI
         detailAboutButton = Button(this).apply {
@@ -1732,7 +1979,6 @@ class MainActivity : ComponentActivity() {
                 openAboutForCurrentLandmark()
             }
         }
-        buttonRow.addView(detailAboutButton)
 
         // Navigate button
         val navigateButton = Button(this).apply {
@@ -1750,16 +1996,21 @@ class MainActivity : ComponentActivity() {
                     }
                 }
         }
-        buttonRow.addView(navigateButton)
 
-        // Close button
-        detailCloseButton = Button(this).apply {
-            text = "✕ Close"
-                setOnClickListener {
-                    hideLandmarkCard()
-                }
+        //button style
+        styleButton(detailListenButton, "#1976D2")   // blue
+        styleButton(detailAboutButton, "#7B1FA2")    // purple
+        styleButton(navigateButton, "#2E7D32")       // green
+
+        fun addSpacer() {
+            buttonRow.addView(View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(12, 1)
+            })
         }
-        buttonRow.addView(detailCloseButton)
+
+        buttonRow.addView(detailListenButton); addSpacer()
+        buttonRow.addView(detailAboutButton); addSpacer()
+        buttonRow.addView(navigateButton); addSpacer()
 
         detailCard.addView(buttonRow)
 
@@ -2059,8 +2310,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
 
-        unregisterReceiver(geofenceReceiver)
-        connectivityManager.unregisterNetworkCallback(networkCallback)
+        try { unregisterReceiver(geofenceReceiver) } catch (_: Exception) {}
+        try { connectivityManager.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
         geofenceManager.removeAllGeofences()
 
         //TTS cleanup
