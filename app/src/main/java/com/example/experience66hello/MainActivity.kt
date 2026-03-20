@@ -240,8 +240,6 @@ class MainActivity : ComponentActivity() {
 
         setContentView(rootLayout)
 
-        showBlockingError(title = "Test Error", message = "If you see this, dialogs work.")
-
         // Set camera to show Arizona Route 66 corridor
         mapView.mapboxMap.setCamera(
             CameraOptions.Builder()
