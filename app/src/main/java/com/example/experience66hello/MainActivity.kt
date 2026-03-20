@@ -1,6 +1,7 @@
 package com.example.experience66hello
 
 import android.Manifest
+import android.location.Location
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -125,9 +126,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var detailTitleText: TextView
     private lateinit var detailImageView: ImageView
     private lateinit var detailDescriptionText: TextView
+    private lateinit var detailDistanceText: TextView
     private lateinit var detailExtraText: TextView
     private lateinit var detailListenButton: Button
     private lateinit var detailAboutButton: Button
+
+    private val liveDistanceListener = OnIndicatorPositionChangedListener { point ->
+        updateDistanceForCurrentLandmark(point)
+    }
 
     // Map annotation → landmark mapping for marker clicks
     private val landmarkByAnnotationId = mutableMapOf<String, Route66Landmark>()
@@ -1810,6 +1816,10 @@ class MainActivity : ComponentActivity() {
             )
             pulsingEnabled = false
         }
+
+        locationComponent.removeOnIndicatorPositionChangedListener(liveDistanceListener)
+        locationComponent.addOnIndicatorPositionChangedListener(liveDistanceListener)
+
         centerMapOnUserLocationIfAvailable()
     }
 
@@ -1855,6 +1865,69 @@ class MainActivity : ComponentActivity() {
             }
         }
         locationComponent.addOnIndicatorPositionChangedListener(oneTimeListener)
+    }
+
+    private fun updateDistanceForCurrentLandmark(userPoint: Point) {
+        val landmarkId = currentLandmarkId ?: return
+        val landmark = route66DatabaseRepository.findLandmarkById(landmarkId)
+            ?: ArizonaLandmarks.findById(landmarkId)
+            ?: return
+
+        val results = FloatArray(1)
+        Location.distanceBetween(
+            userPoint.latitude(),
+            userPoint.longitude(),
+            landmark.latitude,
+            landmark.longitude,
+            results
+        )
+
+        val distanceMeters = results[0]
+        detailDistanceText.text = "Distance from POI: ${formatDistance(distanceMeters)}"
+        detailDistanceText.visibility = View.VISIBLE
+    }
+
+    private fun updateDistanceFromLastKnownLocation(landmark: Route66Landmark) {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            detailDistanceText.text = "Distance unavailable. Location permission is required."
+            detailDistanceText.visibility = View.VISIBLE
+            return
+        }
+
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    val results = FloatArray(1)
+                    Location.distanceBetween(
+                        location.latitude,
+                        location.longitude,
+                        landmark.latitude,
+                        landmark.longitude,
+                        results
+                    )
+                    detailDistanceText.text = "Distance from POI: ${formatDistance(results[0])}"
+                } else {
+                    detailDistanceText.text = "Distance unavailable. Waiting for your current location."
+                }
+                detailDistanceText.visibility = View.VISIBLE
+            }
+            .addOnFailureListener {
+                detailDistanceText.text = "Distance unavailable right now."
+                detailDistanceText.visibility = View.VISIBLE
+            }
+    }
+
+    private fun formatDistance(distanceMeters: Float): String {
+        val feet = distanceMeters * 3.28084f
+        val miles = distanceMeters / 1609.344f
+
+        return if (distanceMeters < 160.9344f) {
+            "${feet.toInt()} ft"
+        } else {
+            String.format(Locale.US, "%.2f mi", miles)
+        }
     }
 
     /**
@@ -2031,6 +2104,15 @@ class MainActivity : ComponentActivity() {
         }
         detailCard.addView(detailDescriptionText)
 
+        detailDistanceText = TextView(this).apply {
+            textSize = 13.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#2E7D32"))
+            setPadding(4, 0, 4, 8)
+            visibility = View.GONE
+        }
+        detailCard.addView(detailDistanceText)
+
         // Extra / historical notes
         detailExtraText = TextView(this).apply {
             textSize = 12.5f
@@ -2152,6 +2234,8 @@ class MainActivity : ComponentActivity() {
         detailImageView.setImageResource(resolveLandmarkImageRes(landmarkId))
         detailDescriptionText.text = description
         detailExtraText.text = extra
+        detailDistanceText.text = "Distance unavailable. Waiting for your current location."
+        detailDistanceText.visibility = View.VISIBLE
 
         detailCard.visibility = View.VISIBLE
 
@@ -2159,6 +2243,10 @@ class MainActivity : ComponentActivity() {
         val lm = route66DatabaseRepository.findLandmarkById(landmarkId)
             ?: ArizonaLandmarks.findById(landmarkId)
         currentDestinationPoint = lm?.toPoint()
+
+        if (lm != null) {
+            updateDistanceFromLastKnownLocation(lm)
+        }
         
         // Find and store archive items for this landmark (for About button)
         if (lm != null) {
@@ -2182,6 +2270,8 @@ class MainActivity : ComponentActivity() {
      */
     private fun hideLandmarkCard() {
         detailCard.visibility = View.GONE
+        detailDistanceText.visibility = View.GONE
+        currentLandmarkId = null
         tts?.stop()
     }
 
@@ -2415,6 +2505,7 @@ class MainActivity : ComponentActivity() {
 
         try { unregisterReceiver(geofenceReceiver) } catch (_: Exception) {}
         try { connectivityManager.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
+        try { mapView.location.removeOnIndicatorPositionChangedListener(liveDistanceListener) } catch (_: Exception) {}
         geofenceManager.removeAllGeofences()
 
         //TTS cleanup
